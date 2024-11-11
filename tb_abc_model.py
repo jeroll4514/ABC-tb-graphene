@@ -24,8 +24,8 @@ class ABC_graphene(object):
     
         if num_layers < 3:
             raise ValueError('Error: num_layers must be >= 3')
-        if valley not in [0,1]:
-            raise ValueError('Error: user-defined valley must be 0,1')
+        if valley not in [-1,1]:
+            raise ValueError('Error: user-defined valley must be -1,1')
         
     def create_H(self,kpi,Uext=0):
         """
