@@ -125,7 +125,7 @@ class ABC_graphene(object):
         return energy
 
     def generate_grid(self,num_k=50,kx_min=-0.01,kx_max=0.01,
-                      ky_min=-0.01,ky_max=0.01,Uext=0):
+                      ky_min=-0.01,ky_max=0.01,Uext=0,output_all=False,output_vecs=False):
         """
         Creates a 2x2 energy grid of the conduction band about our valley
 
@@ -136,16 +136,30 @@ class ABC_graphene(object):
             ky_min (float): minimum ky value to analyze (units of k/G)
             ky_max (float): maximum ky value to analyze (units of k/G)
             Uext (float): external potential between outermost layers
+            output_all (boolean): whether to output all data or just lowest conduction band
+            output_vecs (boolean): whether to output eigenvectors or not
 
         Returns:
-            energy_mesh (array,real): energy landscape of lowest conduction band
+            energy_mesh (num_k*num_k,real): (output_all is False) energy landscape of lowest conduction band
+            energy_mesh (nbands*num_k*num_k): (output_all is True)
+            energy_mesh,vecs: (output_vecs is True)
         """
 
         # Creates k-space mesh
         kx_vals = np.linspace(kx_min,kx_max,num_k)
         ky_vals = np.linspace(ky_min,ky_max,num_k)
 
-        energy_mesh = np.zeros((num_k,num_k),dtype=float)
+        if output_all is False: # if just storing conduction band
+            # [ky][kx]
+            energy_mesh = np.zeros((num_k,num_k),dtype=float)
+        else: # if storing all bands
+            # [band][ky][kx]
+            energy_mesh = np.zeros((2*self.num_layers,num_k,num_k),dtype=float)
+
+        if output_vecs is True:
+            # [ky][kx][band][coeff]
+            energy_vecs = np.zeros((num_k,num_k,2*self.num_layers,2*self.num_layers),dtype=complex)
+
         for ii,kx in enumerate(kx_vals):
             for jj,ky in enumerate(ky_vals):
 
@@ -153,11 +167,27 @@ class ABC_graphene(object):
                 kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
                 H = self.create_H(kpi,Uext=Uext)
 
-                #assumes bottom half of bands occupied and top half of bands are filled
-                eig = np.linalg.eigvalsh(H,UPLO='U')
-                energy_mesh[jj][ii] = eig[self.num_layers] 
+                # assumes bottom half of bands occupied and top half of bands are filled
+                
+                if output_vecs is False: # only stores eigenvalues
+                    eig = np.linalg.eigvalsh(H,UPLO='U')
+                else: # store eigenvalues and eigenvectors
+                    eig,vec = np.linalg.eigh(H,UPLO='U')
 
-        return energy_mesh
+                if output_all is False: # if just storing conduction band
+                    energy_mesh[jj][ii] = eig[self.num_layers] 
+                else: # if storing all bands
+                    for band,val in enumerate(eig):
+                        energy_mesh[band][jj][ii] = val
+                
+                if output_vecs is True:
+                    for band in range(2*self.num_layers):
+                        energy_vecs[jj][ii][band] = vec[:,band]
+
+        if output_vecs is False: # if only outputting energies
+            return energy_mesh
+        else: # if outputting energy and eigenvectors
+            return energy_mesh,energy_vecs
     
     def get_bandgap(self,energy,gamma=False):
         """
@@ -166,7 +196,7 @@ class ABC_graphene(object):
 
         Parameters:
             energy (array,float): the output of generate_cut
-            gamma (logical): whether to look at just Gamma point (k/G=0) or not
+            gamma (boolean): whether to look at just Gamma point (k/G=0) or not
 
         Returns:
             bandgap (float): the bandgap for our system
@@ -205,3 +235,46 @@ class ABC_graphene(object):
                         dos[ii] += 1
 
         return dos/dE #normalizes the number of counts
+
+def TRS_check(sys1,sys2):
+    """
+    This is a function to check if two models are related by time-reversal-symmetry (TRS).
+    Follows notation shown in Equations 11,12 in arXiv:2406.19348
+
+    Parameters:
+        sys1 (class): this is a class as defined by ABC_graphene(nun_layers,valley)
+        sys2 (class): this is a class as defined by ABC_graphene(nun_layers,valley)
+
+    Returns:
+        output (boolean): True(False) implies sys1 and sys2 are(aren't) related by TRS.
+    """
+
+    en1,vec1 = sys1.generate_grid(output_all=True,output_vecs=True)
+    en2,vec2 = sys2.generate_grid(output_all=True,output_vecs=True)
+
+    # First checks the energies are equivalent
+    for band in range(en1.shape[0]):
+        for kx in range(en1.shape[2]):
+            for ky in range(en1.shape[1]):
+
+                # E(+,k) - E(-,-k) 
+                diff = en1[band][ky][kx]-en2[band][(en2.shape[1]-1)-ky][(en2.shape[2]-1)-kx]
+
+                if abs(diff) > 1e-8:
+                    print(f'Two systems are NOT TRS: Energy difference in band {band} at index ({kx,ky})')
+                    return False
+
+    # Second checks if the eigenvectors are equivalent
+    for kx in range(en1.shape[2]):
+        for ky in range(en1.shape[1]):
+            for band in range(en1.shape[0]):
+                for coeff in range(vec1.shape[3]):
+
+                    # z(+,l,k) - conj[ z(-,l,-k) ]
+                    diff = vec1[ky][kx][band][coeff] - np.conj(vec2[(en2.shape[1]-1)-ky][(en2.shape[2]-1)-kx][band][coeff])
+
+                    if abs(diff) > 1e-8:
+                        print(f'Two systems are NOT TRS: Eigenvec. coeff difference in band {band} at index ({kx,ky})')
+                        return False
+
+    return True
