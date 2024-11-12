@@ -252,6 +252,10 @@ def TRS_check(sys1,sys2):
     en1,vec1 = sys1.generate_grid(output_all=True,output_vecs=True)
     en2,vec2 = sys2.generate_grid(output_all=True,output_vecs=True)
 
+    if en1.shape[0] != en2.shape[0] or en1.shape[1] != en2.shape[1]:
+        print('Two systems are NOT TRS: have different dimensionality')
+        return False
+    
     # First checks the energies are equivalent
     for band in range(en1.shape[0]):
         for kx in range(en1.shape[2]):
