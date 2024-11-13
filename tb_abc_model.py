@@ -268,7 +268,7 @@ class ABC_graphene(object):
         temp_max = 0 # will store temporary maximum DOS
         for U in Uvals:
             en = self.generate_cut(num_k=1000,krange=0.025,Uext=U)
-            en_dos,dos = self.generate_dos(en,dE=0.005,Emin=-0.5,Emax=0.5)
+            en_dos,dos = self.generate_dos(en,dE=0.005,Emin=Emin,Emax=Emax)
             if max(dos) > temp_max:
                 temp_max = max(dos)
                 Uopt = U
@@ -282,8 +282,8 @@ def TRS_check(sys1,sys2):
     Follows notation shown in Equations 11,12 in arXiv:2406.19348
 
     Parameters:
-        sys1 (class): this is a class as defined by ABC_graphene(nun_layers,valley)
-        sys2 (class): this is a class as defined by ABC_graphene(nun_layers,valley)
+        sys1 (class): this is a class as defined by ABC_graphene(num_layers,valley)
+        sys2 (class): this is a class as defined by ABC_graphene(num_layers,valley)
 
     Returns:
         output (boolean): True(False) implies sys1 and sys2 are(aren't) related by TRS.
