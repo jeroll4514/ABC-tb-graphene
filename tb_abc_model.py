@@ -45,6 +45,12 @@ class ABC_graphene(object):
         # Table 1 in PHYSICAL REVIEW B 82, 035409 (2010)
         delta = -0.0014 # delta  [eV]
         g = np.array([3.16,0.502,-0.0171,-0.377,-0.099,0,0]) # gamma values [eV]
+
+        # Experimental tight-binding parameters
+        # Tight-binding model section in arXiv:2408.15233
+        # delta = 0 # [eV]
+        # g = np.array([3.1,0.38,-0.0083,-0.29,-0.141,0,0]) # gamma values [eV]
+
         # values of u depend on external field, and are defined later
         nu = s3*g/2
 
@@ -140,9 +146,9 @@ class ABC_graphene(object):
             output_vecs (boolean): whether to output eigenvectors or not
 
         Returns:
-            energy_mesh (num_k*num_k,real): (output_all is False) energy landscape of lowest conduction band
-            energy_mesh (nbands*num_k*num_k): (output_all is True)
-            energy_mesh,vecs: (output_vecs is True)
+            energy_mesh (num_k*num_k,real): if output_all is False. energy landscape of lowest conduction band
+            energy_mesh (nbands*num_k*num_k): if output_all is True
+            energy_mesh,vecs: if output_vecs is True
         """
 
         # Creates k-space mesh
@@ -218,6 +224,7 @@ class ABC_graphene(object):
             Emax (float): maximum energy to analyze
 
         Returns:
+            en_out (array,float): energy axis for our dos
             dos (array,float): density of electronic states
         """
 
@@ -225,16 +232,49 @@ class ABC_graphene(object):
             en = self.generate_cut(num_k=1000,krange=0.025)
 
         num_bins = round((Emax-Emin)/dE)
+        en_out = np.zeros(num_bins)
         dos = np.zeros(num_bins)
+
         for ii in range(num_bins):
             E0 = Emin + ii*dE
             E1 = Emin + (ii+1)*dE
+            en_out[ii] = (E0+E1)/2
             for band in en:
                 for energy_val in band:
                     if E0 <= energy_val and energy_val < E1:
                         dos[ii] += 1
 
-        return dos/dE #normalizes the number of counts
+        return en_out,dos/dE #normalizes the number of counts
+    
+    def find_flat_U(self,Umax=0.2,Udim=50,dE=0.01,Emin=-0.5,Emax=0.5):
+        """
+        Will find the potential difference U which yields the flattest band near our Fermi surface.
+        This will return the U which returns the highest DOS and the energy where this occurs.
+
+        Parameters:
+            Umax (float): the maximum U to check
+            Udim (int): the number of U values to check
+            dE (float): the width of our energy bins for the DOS
+            Emin (float): minimum energy to check
+            Emax (float): maximum energy to check
+
+        Returns:
+            Uopt (float): U with flattest band
+            en_flat (float): energy where our flattness occurs
+        """
+
+        Uvals = np.linspace(0,Umax,Udim)
+        Uopt = 0 # will store the U value with the flattest band (highest DOS)
+        temp_max = 0 # will store temporary maximum DOS
+        for U in Uvals:
+            en = self.generate_cut(num_k=1000,krange=0.025,Uext=U)
+            en_dos,dos = self.generate_dos(en,dE=0.005,Emin=-0.5,Emax=0.5)
+            if max(dos) > temp_max:
+                temp_max = max(dos)
+                Uopt = U
+                en_flat = en_dos[np.argmax(dos)]
+
+        return Uopt,en_flat
 
 def TRS_check(sys1,sys2):
     """
@@ -253,9 +293,9 @@ def TRS_check(sys1,sys2):
     en2,vec2 = sys2.generate_grid(output_all=True,output_vecs=True)
 
     if en1.shape[0] != en2.shape[0] or en1.shape[1] != en2.shape[1]:
-        print('Two systems are NOT TRS: have different dimensionality')
+        print(f'Two systems are NOT TRS: have different dimensionality')
         return False
-    
+
     # First checks the energies are equivalent
     for band in range(en1.shape[0]):
         for kx in range(en1.shape[2]):
