@@ -1,12 +1,21 @@
 #Tight-binding model for ABC stacked graphene
 
 import numpy as np
+from numba.experimental import jitclass # for the class structure
+from numba import njit # for extra functions
+from numba import int32,float32,complex64
 
 #Establishes constants
 pi = np.pi
 s3 = np.sqrt(3)
 G = 4*pi/s3 # [1/a]
 
+spec = [
+    ('num_layers',int32),
+    ('valley',int32)
+]
+
+@jitclass(spec)
 class ABC_graphene(object):
     """
     A class to create a tight-binding model for
@@ -27,15 +36,15 @@ class ABC_graphene(object):
         if valley not in [-1,1]:
             raise ValueError('Error: user-defined valley must be -1,1')
         
-    def create_H(self,kpi,Uext=0):
+    def create_H(self,kpi,Uext):
         """
-        Creates our Hamiltonian matrix given our kpoint
+        Creates our lower diagonal Hamiltonian matrix given our kpoint
         and external potential
 
         Parameters:
             kpi (complex): kpoint w.r.t. valley: kpi = xi*kx + i*ky
                 THIS MUST BE IN UNITS OF [k/G]
-            Uext (float): external potential between outermost layers
+            Uext (float): external potential between outermost layers [meV]
 
         Returns:
             H (array,complex): Hamiltonian matrix
@@ -43,13 +52,13 @@ class ABC_graphene(object):
 
         # Defines tight-binding parameters
         # Table 1 in PHYSICAL REVIEW B 82, 035409 (2010)
-        delta = -0.0014 # delta  [eV]
-        g = np.array([3.16,0.502,-0.0171,-0.377,-0.099,0,0]) # gamma values [eV]
+        delta = -0.0014*1000 # delta  [meV]
+        g = np.array([3.16,0.502,-0.0171,-0.377,-0.099,0,0])*1000 # gamma values [meV]
 
         # Experimental tight-binding parameters
         # Tight-binding model section in arXiv:2408.15233
         # delta = 0 # [eV]
-        # g = np.array([3.1,0.38,-0.0083,-0.29,-0.141,0,0]) # gamma values [eV]
+        # g = np.array([3.1,0.38,-0.0083,-0.29,-0.141,0,0])*1000 # gamma values [meV]
 
         # values of u depend on external field, and are defined later
         nu = s3*g/2
@@ -59,7 +68,7 @@ class ABC_graphene(object):
         # Puts external potential onto onsite-energies
         u = np.linspace(-Uext/2,Uext/2,self.num_layers)
 
-        H = np.zeros((2*self.num_layers,2*self.num_layers),dtype=complex)
+        H = np.zeros((2*self.num_layers,2*self.num_layers),dtype=complex64)
 
         # Fills in the rest of the Hamiltonian
         for rind in range(0,2*self.num_layers):
@@ -67,7 +76,7 @@ class ABC_graphene(object):
 
                 # main diagonal
                 if cind==rind:
-                    H[rind][cind] = u[np.floor(rind/2).astype(int)]
+                    H[rind][cind] = u[int(rind/2)]
                 # 1st off diagonal
                 if cind==(rind+1):
                     if rind%2==0:
@@ -95,9 +104,12 @@ class ABC_graphene(object):
         H[0][0] += delta
         H[-1][-1] += delta
 
-        return H
+        return np.conj(H).T # lower diagonal
     
-    def generate_cut(self,num_k=50,krange=0.01,Uext=0):
+    def test(self,num):
+        return num
+
+    def generate_cut(self,num_k,krange,Uext):
         """
         Creates a cut of our energy landscape 
 
@@ -113,89 +125,75 @@ class ABC_graphene(object):
         kx_vals = np.linspace(krange,-krange,num_k)
         ky_vals = np.linspace(0,0,num_k)
 
-        energy = list([] for _ in range(2*self.num_layers))
-        for ii in range(num_k):
+        # energy[band][k]
+        energy = np.zeros((2*self.num_layers,num_k))
+        for k in range(num_k):
 
             # Defines kpoints
-            kx = kx_vals[ii] # k/G
-            ky = ky_vals[ii] # k/G
+            kx = kx_vals[k] # k/G
+            ky = ky_vals[k] # k/G
 
             #Creates hamiltonian
             kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
-            H = self.create_H(kpi,Uext=Uext)
+            H = self.create_H(kpi,Uext)
 
-            eig = np.linalg.eigvalsh(H,UPLO='U')
-            for jj,en in enumerate(eig):
-                energy[jj].append(en)
+            eig = np.linalg.eigvalsh(H) # lower diagonal
+            for band,en in enumerate(eig):
+                energy[band][k] = en
 
         return energy
 
-    def generate_grid(self,num_k=50,kx_min=-0.01,kx_max=0.01,
-                      ky_min=-0.01,ky_max=0.01,Uext=0,output_all=False,output_vecs=False):
+    def generate_grid(self,num_k,krange,Uext,output_vecs):
         """
         Creates a 2x2 energy grid of the conduction band about our valley
 
         Parameters:
             num_k (int): dimensionality of k-point partition
-            kx_min (float): minimum kx value to analyze (units of k/G)
-            kx_max (float): maximum kx value to analyze (units of k/G)
-            ky_min (float): minimum ky value to analyze (units of k/G)
-            ky_max (float): maximum ky value to analyze (units of k/G)
+            krange (float): analyze square grid of (-krange,krange) (units of k/G)
             Uext (float): external potential between outermost layers
-            output_all (boolean): whether to output all data or just lowest conduction band
             output_vecs (boolean): whether to output eigenvectors or not
 
         Returns:
-            energy_mesh (num_k*num_k,real): if output_all is False. energy landscape of lowest conduction band
             energy_mesh (nbands*num_k*num_k): if output_all is True
-            energy_mesh,vecs: if output_vecs is True
+            energy_mesh,vecs: 
         """
 
         # Creates k-space mesh
-        kx_vals = np.linspace(kx_min,kx_max,num_k)
-        ky_vals = np.linspace(ky_min,ky_max,num_k)
+        kx_vals = np.linspace(-krange,krange,num_k)
+        ky_vals = np.linspace(-krange,krange,num_k)
 
-        if output_all is False: # if just storing conduction band
-            # [ky][kx]
-            energy_mesh = np.zeros((num_k,num_k),dtype=float)
-        else: # if storing all bands
-            # [band][ky][kx]
-            energy_mesh = np.zeros((2*self.num_layers,num_k,num_k),dtype=float)
+        energy_mesh = np.zeros((2*self.num_layers,num_k,num_k),dtype=float32)
 
-        if output_vecs is True:
-            # [ky][kx][band][coeff]
-            energy_vecs = np.zeros((num_k,num_k,2*self.num_layers,2*self.num_layers),dtype=complex)
+        # [ky][kx][band][coeff]
+        energy_vecs = np.zeros((num_k,num_k,2*self.num_layers,2*self.num_layers),dtype=complex64)
 
         for ii,kx in enumerate(kx_vals):
             for jj,ky in enumerate(ky_vals):
 
                 # Creates Hamiltonian
                 kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
-                H = self.create_H(kpi,Uext=Uext)
+                H = self.create_H(kpi,Uext)
 
                 # assumes bottom half of bands occupied and top half of bands are filled
                 
                 if output_vecs is False: # only stores eigenvalues
-                    eig = np.linalg.eigvalsh(H,UPLO='U')
+                    eig = np.linalg.eigvalsh(H) # lower diagonal
                 else: # store eigenvalues and eigenvectors
-                    eig,vec = np.linalg.eigh(H,UPLO='U')
+                    eig,vec = np.linalg.eigh(H) # lower diagonal
 
-                if output_all is False: # if just storing conduction band
-                    energy_mesh[jj][ii] = eig[self.num_layers] 
-                else: # if storing all bands
-                    for band,val in enumerate(eig):
-                        energy_mesh[band][jj][ii] = val
+                # if output_all is False: # if just storing conduction band
+                #     energy_mesh[jj][ii] = eig[self.num_layers] 
+                # else: # if storing all bands
+                for band,val in enumerate(eig):
+                    energy_mesh[band][jj][ii] = val
                 
                 if output_vecs is True:
                     for band in range(2*self.num_layers):
                         energy_vecs[jj][ii][band] = vec[:,band]
 
-        if output_vecs is False: # if only outputting energies
-            return energy_mesh
-        else: # if outputting energy and eigenvectors
-            return energy_mesh,energy_vecs
+        return energy_mesh,energy_vecs
     
-    def get_bandgap(self,energy,gamma=False):
+    def get_bandgap(self,energy,gamma):
         """
         This obtains the bandgap given the total energy of all bands
         (Given standard output of self.generate_cut with np.linalg.eigvalsh)
@@ -212,41 +210,8 @@ class ABC_graphene(object):
         else:
             k_gamma = round(len(energy[0])/2) #index for gamma point
             return energy[self.num_layers][k_gamma] - energy[self.num_layers-1][k_gamma]
-        
-    def generate_dos(self,en=[],dE=0.01,Emin=-0.5,Emax=0.5):
-        """
-        Generates the density of states (DOS) for our electronic bandstructure
-
-        Parameters:
-            en (array): energy array from standard ouput of self.generate_cut (if not given, will be calculated)
-            dE (float): width of energy bin
-            Emin (float): minimum energy to analyze
-            Emax (float): maximum energy to analyze
-
-        Returns:
-            en_out (array,float): energy axis for our dos
-            dos (array,float): density of electronic states
-        """
-
-        if en==[]:
-            en = self.generate_cut(num_k=1000,krange=0.025)
-
-        num_bins = round((Emax-Emin)/dE)
-        en_out = np.zeros(num_bins)
-        dos = np.zeros(num_bins)
-
-        for ii in range(num_bins):
-            E0 = Emin + ii*dE
-            E1 = Emin + (ii+1)*dE
-            en_out[ii] = (E0+E1)/2
-            for band in en:
-                for energy_val in band:
-                    if E0 <= energy_val and energy_val < E1:
-                        dos[ii] += 1
-
-        return en_out,dos/dE #normalizes the number of counts
     
-    def find_flat_U(self,Umax=0.2,Udim=50,dE=0.01,Emin=-0.5,Emax=0.5):
+    def find_flat_U(self,Umax,Udim,dE,Emin,Emax):
         """
         Will find the potential difference U which yields the flattest band near our Fermi surface.
         This will return the U which returns the highest DOS and the energy where this occurs.
@@ -275,6 +240,95 @@ class ABC_graphene(object):
                 en_flat = en_dos[np.argmax(dos)]
 
         return Uopt,en_flat
+
+@njit
+def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
+    """
+    Generates the density of states (DOS) for our electronic bandstructure
+
+    Parameters:
+        en (array): energy array from standard ouput of self.generate_cut or self.generate_grid
+        dE (float): width of energy bin
+        Emin (float): minimum energy to analyze
+        Emax (float): maximum energy to analyze
+
+    Returns:
+        en_out (array,float): energy axis for our dos
+        dos (array,float): density of electronic states (per spin)
+    """
+
+    num_bins = round((Emax-Emin)/dE)
+    en_out = np.zeros(num_bins)
+    dos = np.zeros(num_bins)
+    N = 0 # total number of points counted (for normalization)
+
+    if en.ndim == 2: # self.generate_cut or self.generate_grid(just lowest conduction band)
+        ax_band = 0
+        ax_k = 1
+
+        for bin in range(num_bins):
+            E0 = Emin + bin*dE
+            E1 = Emin + (bin+1)*dE
+            en_out[bin] = (E0+E1)/2
+            for k_ind in range(en.shape[ax_k]):
+                for band in range(en.shape[ax_band]):
+                    energy_val = en[band][k_ind]
+                    if E0 <= energy_val and energy_val < E1:
+                        dos[bin] += 1
+                        N += 1
+
+    elif en.ndim == 3: # self.generate_grid(all bands)
+        ax_band = 0
+        ax_kx = 1
+        ax_ky = 2
+
+        for bin in range(num_bins):
+            E0 = Emin + bin*dE
+            E1 = Emin + (bin+1)*dE
+            en_out[bin] = (E0+E1)/2
+            for kx_ind in range(en.shape[ax_kx]):
+                for ky_ind in range(en.shape[ax_ky]):
+                    for band in range(en.shape[ax_band]):
+                        energy_val = en[band][ky_ind][kx_ind]
+                        if E0 <= energy_val and energy_val < E1:
+                            dos[bin] += 1
+                            N += 1
+
+    return en_out , dos/dE #normalizes the number of counts
+
+@njit
+def carr_density(en,en_dos,dos):
+        """
+        This calculates the charge carrier density bound by the fermi momentum (kx,ky)
+        in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
+
+        n = int_{E_c}^E(kx,ky) g(E') dE
+
+        Parameters:
+            en (array,float): standard output for the energy from self.generate_grid(conduction band)
+            en_dos (array,float): standard output for the energy from self.generate_dos()
+            dos (array,float): standard output for the dos from self.generate_dos()
+
+        Returns:
+            n (array,float): a grid storing the carrier density.  Same dimensions as en
+        """
+
+        n = np.zeros(en.shape)
+        dE = en_dos[1]-en_dos[0]
+        Emin = np.min(en) # lower bound of integration of conduction band
+        Emin_ind = np.argmin(np.abs(en_dos-Emin)) # finds energy index for lower bound in en_dos
+        for kx in range(en.shape[1]):
+            for ky in range(en.shape[0]):
+
+                # Performs integral for a fixed (kx,ky)
+                Emax = en[ky][kx] # upper limit of integration
+
+                for Eprime_ind,Eprime in enumerate(en_dos[Emin_ind:]): # starts integration at Emin
+                    # Adds term in our Riemann integral
+                    if 0 <= Eprime and Eprime <= Emax:
+                        n[ky][kx] = dos[Eprime_ind]*dE
+
+        return n
 
 def TRS_check(sys1,sys2):
     """
