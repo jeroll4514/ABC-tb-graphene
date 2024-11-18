@@ -105,9 +105,6 @@ class ABC_graphene(object):
         H[-1][-1] += delta
 
         return np.conj(H).T # lower diagonal
-    
-    def test(self,num):
-        return num
 
     def generate_cut(self,num_k,krange,Uext):
         """
@@ -211,29 +208,36 @@ class ABC_graphene(object):
             k_gamma = round(len(energy[0])/2) #index for gamma point
             return energy[self.num_layers][k_gamma] - energy[self.num_layers-1][k_gamma]
     
-    def find_flat_U(self,Umax,Udim,dE,Emin,Emax):
+    def find_flat_U(self,Umin,Umax,Udim,dE):
         """
         Will find the potential difference U which yields the flattest band near our Fermi surface.
         This will return the U which returns the highest DOS and the energy where this occurs.
 
         Parameters:
+            Umin (float): the minimum U to check
             Umax (float): the maximum U to check
             Udim (int): the number of U values to check
             dE (float): the width of our energy bins for the DOS
-            Emin (float): minimum energy to check
-            Emax (float): maximum energy to check
 
         Returns:
             Uopt (float): U with flattest band
             en_flat (float): energy where our flattness occurs
         """
 
-        Uvals = np.linspace(0,Umax,Udim)
+        Uvals = np.linspace(Umin,Umax,Udim)
         Uopt = 0 # will store the U value with the flattest band (highest DOS)
-        temp_max = 0 # will store temporary maximum DOS
+        temp_max = 0 # will store maximum DOS
         for U in Uvals:
-            en = self.generate_cut(num_k=1000,krange=0.025,Uext=U)
-            en_dos,dos = self.generate_dos(en,dE=0.005,Emin=Emin,Emax=Emax)
+            # print(f'Testing U_ext = {U} meV',flush=True)
+            # print(f'    Generating grid',flush=True)
+            en,t = self.generate_grid(500,0.025,U,False)
+            en_cond = en[self.num_layers]
+            Emin = np.min(en_cond)
+            Emax = Emin+3 # +3 here is from seeing our maximum dos typically occuring within 3 meV of minimum
+            # print(f'        Min energy: {Emin} meV')
+            # print(f'    Generating dos',flush=True)
+            en_dos,dos = generate_dos(en=en_cond,dE=dE,Emin=Emin,Emax=Emax) # dos for conduction band
+            # print(f'        Max dos: {max(dos)}')
             if max(dos) > temp_max:
                 temp_max = max(dos)
                 Uopt = U
@@ -247,7 +251,7 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
     Generates the density of states (DOS) for our electronic bandstructure
 
     Parameters:
-        en (array): energy array from standard ouput of self.generate_cut or self.generate_grid
+        en (array): energy array from standard ouput of self.generate_grid
         dE (float): width of energy bin
         Emin (float): minimum energy to analyze
         Emax (float): maximum energy to analyze
@@ -260,9 +264,9 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
     num_bins = round((Emax-Emin)/dE)
     en_out = np.zeros(num_bins)
     dos = np.zeros(num_bins)
-    N = 0 # total number of points counted (for normalization)
 
-    if en.ndim == 2: # self.generate_cut or self.generate_grid(just lowest conduction band)
+    if en.ndim == 2: # self.generate_grid (just lowest conduction band)
+        N_tot = en.shape[0]*en.shape[1] # total number of k-points in discretization
         ax_band = 0
         ax_k = 1
 
@@ -275,9 +279,9 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
                     energy_val = en[band][k_ind]
                     if E0 <= energy_val and energy_val < E1:
                         dos[bin] += 1
-                        N += 1
 
     elif en.ndim == 3: # self.generate_grid(all bands)
+        N_tot = en.shape[1]*en.shape[2] # total number of k-points in discretization
         ax_band = 0
         ax_kx = 1
         ax_ky = 2
@@ -292,12 +296,11 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
                         energy_val = en[band][ky_ind][kx_ind]
                         if E0 <= energy_val and energy_val < E1:
                             dos[bin] += 1
-                            N += 1
 
-    return en_out , dos/dE #normalizes the number of counts
+    return en_out , dos/dE # number of counts per energy bin
 
 @njit
-def carr_density(en,en_dos,dos):
+def carr_density(krange,en,en_dos,dos):
         """
         This calculates the charge carrier density bound by the fermi momentum (kx,ky)
         in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
@@ -325,10 +328,19 @@ def carr_density(en,en_dos,dos):
 
                 for Eprime_ind,Eprime in enumerate(en_dos[Emin_ind:]): # starts integration at Emin
                     # Adds term in our Riemann integral
-                    if 0 <= Eprime and Eprime <= Emax:
-                        n[ky][kx] = dos[Eprime_ind]*dE
+                    if Emin <= Eprime and Eprime <= Emax:
+                        n[ky][kx] += dos[Eprime_ind]*dE # number of k-points
 
-        return n
+        tot_pts = en.shape[0]*en.shape[1]
+        a = 0.246*100 # 10^-9 cm ; lattice constant
+        area_per_pt = (2*krange)**2*(4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
+
+        # Now multiplies number of k-points by area per k-point
+        n *= area_per_pt
+
+        # Multiplies factors from original integration over (kx,ky)
+
+        return n/(2*pi)**2
 
 def TRS_check(sys1,sys2):
     """
