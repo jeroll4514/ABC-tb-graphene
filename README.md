@@ -6,7 +6,8 @@ This contains code to implement a tight-binding model for ABC stacked (rhombohed
 + get_bandgap: determines the true bandgap or explicitly the energy gap at our high-symmetry K(K') point.
 + find_flat_U: finds the potential difference between the outermost layers, yielding the flattest minimum conduction band.
 + generate_dos: calculates the density-of-states of our energy landscape (typically just the minimum conduction band)
-+ carr_density: calculates the (electron) charge carrier density landscape
++ carr_density: calculates the (electron) charge carrier density landscape.  This has the upper limit of integration as E(kx,ky) instead of the standard E_fermi.
++ TRS_check: checks if an input system is time-reversal symmetric
 
 To use this class, one must simply import it at the beginning of one's code.  So if the class file (tb_ABC_model.py) is within the running directory, this is:
 
