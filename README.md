@@ -11,8 +11,10 @@ This contains code to implement a tight-binding model for ABC stacked (rhombohed
 
 To use this class, one must simply import it at the beginning of one's code.  So if the class file (tb_ABC_model.py) is within the running directory, this is:
 
-from tb_ABC_model import ABC_graphene
-
-or
-
 import tb_ABC_model as tb
+
+Then one can use the class/functions with the prefactor tb.XXX
+
+Example: 
+
+graphene_4L = tb.ABC_graphene(num_layers=3,valley=1)
