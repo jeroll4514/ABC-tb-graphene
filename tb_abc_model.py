@@ -2,7 +2,7 @@
 
 import numpy as np
 from numba.experimental import jitclass # for the class structure
-from numba import njit # for extra functions
+from numba import njit,prange # for extra functions
 from numba import int32,float32,complex64
 
 #Establishes constants
@@ -178,9 +178,6 @@ class ABC_graphene(object):
                 else: # store eigenvalues and eigenvectors
                     eig,vec = np.linalg.eigh(H) # lower diagonal
 
-                # if output_all is False: # if just storing conduction band
-                #     energy_mesh[jj][ii] = eig[self.num_layers] 
-                # else: # if storing all bands
                 for band,val in enumerate(eig):
                     energy_mesh[band][jj][ii] = val
                 
@@ -245,6 +242,49 @@ class ABC_graphene(object):
 
         return Uopt,en_flat
 
+    def pot2disp(self,delta): 
+        """
+        Converts 'potential difference between outermost layers' to displacement field between two parallel plates.
+        This effecively goes between the theoretical and experimental data.
+
+        Parameters: 
+            delta (float): the potential difference between outermost layers [meV]
+
+        Returns:
+            disp (float): the displacement field [e_0^-1 V/nm]
+        """
+
+        interlayer_distance = 0.335 # [nm] https://doi.org/10.1103/PhysRevB.82.035409
+        hBN_const = (3.29+3.76)/2   # hBN dielectric constant - https://doi.org/10.1038/s41699-018-0050-x 
+        graphite_const = 8 # middle-ground of bulk graphite and bilayer graphene dielectric constant https://doi.org/10.1039/C8NA00350E 
+
+        # For a constant electric field (assumed here), potential difference is
+        # delta = 1000* (num_layers-1)*(interlayer_distance)/dielectric * E
+
+        return delta/1e3/(self.num_layers-1)/interlayer_distance*graphite_const
+    
+    def disp2pot(self,disp):
+        """
+        Converts displacement field between two parallel plates to 'potential difference between outermost layers'
+        This effecively goes between the experimental and theoretical data.
+
+        Parameters:
+            disp (float): the displacement field [e_0^-1 V/nm]
+
+        Returns: 
+            delta (float): the potential difference between outermost layers [meV]
+        """
+
+        interlayer_distance = 0.335 # [nm] https://doi.org/10.1103/PhysRevB.82.035409
+        hBN_const = (3.29+3.76)/2   # hBN dielectric constant - https://doi.org/10.1038/s41699-018-0050-x 
+        graphite_const = 8 # middle-ground of bulk graphite and bilayer graphene dielectric constant https://doi.org/10.1039/C8NA00350E 
+
+        # For a constant applied electric field (assumed here), potential difference is
+        # delta = 1000* (num_layers-1)*(interlayer_distance)/dielectric * E
+
+        return 1e3*disp*(self.num_layers-1)*interlayer_distance/graphite_const
+        
+
 @njit
 def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
     """
@@ -269,24 +309,35 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
         N_tot = en.shape[0]*en.shape[1] # total number of k-points in discretization
         ax_band = 0
         ax_k = 1
+        en_flat = en.flatten()
 
-        for bin in range(num_bins):
+        for bin in prange(num_bins):
             E0 = Emin + bin*dE
             E1 = Emin + (bin+1)*dE
             en_out[bin] = (E0+E1)/2
-            for k_ind in range(en.shape[ax_k]):
-                for band in range(en.shape[ax_band]):
-                    energy_val = en[band][k_ind]
-                    if E0 <= energy_val and energy_val < E1:
-                        dos[bin] += 1
+            for energy_ind in range(len(en_flat)):
+                energy_val = en_flat[energy_ind]
+                if E0 <= energy_val and energy_val < E1:
+                    dos[bin] += 1
+            # for energy_val in en_flat:
+            #     if E0 <= energy_val and energy_val < E1:
+            #         dos[bin] += 1
+            # for k_ind in range(en.shape[ax_k]):
+            #     for band in range(en.shape[ax_band]):
+            #         energy_val = en[band][k_ind]
+            #         if E0 <= energy_val and energy_val < E1:
+            #             dos[bin] += 1
 
     elif en.ndim == 3: # self.generate_grid(all bands)
+
+        raise NotImplementedError('New developments have made this not functional')
+
         N_tot = en.shape[1]*en.shape[2] # total number of k-points in discretization
         ax_band = 0
         ax_kx = 1
         ax_ky = 2
 
-        for bin in range(num_bins):
+        for bin in prange(num_bins):
             E0 = Emin + bin*dE
             E1 = Emin + (bin+1)*dE
             en_out[bin] = (E0+E1)/2
@@ -301,46 +352,98 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
 
 @njit
 def carr_density(krange,en,en_dos,dos):
-        """
-        This calculates the charge carrier density bound by the fermi momentum (kx,ky)
-        in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
+    """
+    This calculates the charge carrier density landscape bound by the fermi momentum (kx,ky)
+    in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
 
-        n = int_{E_c}^E(kx,ky) g(E') dE
+    n = (2pi)^-2 * int_{E_c}^E(kx,ky) g(E') dE
 
-        Parameters:
-            en (array,float): standard output for the energy from self.generate_grid(conduction band)
-            en_dos (array,float): standard output for the energy from self.generate_dos()
-            dos (array,float): standard output for the dos from self.generate_dos()
+    Parameters:
+        krange (float): analyzing k-space from -krange to krange
+        en (array,float): standard output for the energy from self.generate_grid(conduction band)
+        en_dos (array,float): standard output for the energy from self.generate_dos()
+        dos (array,float): standard output for the dos from self.generate_dos()
 
-        Returns:
-            n (array,float): a grid storing the carrier density.  Same dimensions as en
-        """
+    Returns:
+        n (array,float): a grid storing the carrier density.  Same dimensions as en
+    """
 
-        n = np.zeros(en.shape)
-        dE = en_dos[1]-en_dos[0]
-        Emin = np.min(en) # lower bound of integration of conduction band
-        Emin_ind = np.argmin(np.abs(en_dos-Emin)) # finds energy index for lower bound in en_dos
-        for kx in range(en.shape[1]):
-            for ky in range(en.shape[0]):
+    n = np.zeros(en.shape)
+    dE = en_dos[1]-en_dos[0]
+    Emin = np.min(en) # lower bound of integration of conduction band
+    Emin_ind = np.argmin(np.abs(en_dos-Emin)) # finds energy index for lower bound in en_dos
 
-                # Performs integral for a fixed (kx,ky)
-                Emax = en[ky][kx] # upper limit of integration
+    for kx in range(en.shape[1]):
+        for ky in range(en.shape[0]):
 
-                for Eprime_ind,Eprime in enumerate(en_dos[Emin_ind:]): # starts integration at Emin
-                    # Adds term in our Riemann integral
-                    if Emin <= Eprime and Eprime <= Emax:
-                        n[ky][kx] += dos[Eprime_ind]*dE # number of k-points
+            # Performs integral for a fixed (kx,ky)
+            Emax = en[ky][kx] # upper limit of integration
+            Emax_ind = np.argmin(np.abs(en_dos-Emax)) # finds energy index for current integration upper limit
 
-        tot_pts = en.shape[0]*en.shape[1]
-        a = 0.246*100 # 10^-9 cm ; lattice constant
-        area_per_pt = (2*krange)**2*(4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
+            # if this is a new energy value to integrate
+            for dos_val in dos[Emin_ind:Emax_ind+1]:
+                # Adds term in our Riemann integral when: Emin <= Eprime <= Emax
+                n[ky][kx] += dos_val*dE # number of k-points
 
-        # Now multiplies number of k-points by area per k-point
-        n *= area_per_pt
+            # this last block is equivalent (but more efficient) to the following (easier to understand) block
+            # for Eprime_ind,Eprime in enumerate(en_dos):
+            #     if Emin <= Eprime and Eprime <= Emax:
+            #         n[ky][kx] += dos[Eprime_ind]*dE
 
-        # Multiplies factors from original integration over (kx,ky)
+    tot_pts = en.shape[0]*en.shape[1]
+    a = 0.246*100 # 10^-9 cm ; lattice constant
+    area_per_pt = (2*krange)**2*(4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
 
-        return n/(2*pi)**2
+    # Now multiplies number of k-points by area per k-point
+    n *= area_per_pt
+
+    # Multiplies factors from original integration over (kx,ky)
+
+    return n/(2*pi)**2
+
+@njit
+def find_surface_recombination(grid):
+    """
+    Finds value where contours of the input grid merge into one surface (instead of many smaller pockets)
+
+    Parameters:
+        grid (float,array): for this project will be the std output of generate_grid(one-band-only) or carr_density()
+
+    Returns:
+        grid_val_out: this is the value where our contour merges into one surface
+    """
+
+    value_found = False # will store if a closed contour exists
+    center_ind = int(grid.shape[0]/2) # index going through horizontal center of grid
+
+    for grid_val in np.unique(grid): # iterates over all unique values in grid
+
+        occurances = 0 # number of occurances of a specific number
+        
+        cut_ind_store = np.zeros(40) # will store index where grid hits value of interest
+        for cut_ind in range(grid.shape[1]-1): # looks across grid cut
+            grid_center1 = grid[center_ind][cut_ind]
+            grid_center2 = grid[center_ind][cut_ind+1]
+            if (grid_center1 <= grid_val and grid_val < grid_center2) \
+                    or (grid_center2 <= grid_val and grid_val < grid_center1):
+                cut_ind_store[occurances] = cut_ind
+                occurances += 1
+            
+            if occurances == 40:
+                raise ValueError('Number of surfaces exeeds 20; something is wrong with the grid')
+
+        # Checks if surface intersects with middle cut twice and that both occurances are NOT on
+        # the same side (left-right).  If they are on the same side, then we have three isolated pockets
+        # due to 3-fold symmetry
+        if occurances == 2 and sum(cut_ind_store) < grid.shape[1]:
+            value_found = True
+            grid_val_out = grid_val
+            break
+
+    if value_found is False:
+        raise ValueError('The surface with which you seek does not exist.')
+
+    return grid_val_out
 
 def TRS_check(sys1,sys2):
     """
