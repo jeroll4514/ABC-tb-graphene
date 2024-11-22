@@ -5,6 +5,7 @@ This contains code to implement a tight-binding model for ABC stacked (rhombohed
 + generate_grid: calculates the energy landscape on a square grid about the K(K') valley.  Will also return the eigenvectors for all points if needed.
 + get_bandgap: determines the true bandgap or explicitly the energy gap at our high-symmetry K(K') point.
 + find_flat_U: finds the potential difference between the outermost layers, yielding the flattest minimum conduction band.
++ pot2disp / disp2pot: goes between "potential between outermost layers" and "applied electric field" to directly compare theory and experimental results.
 + generate_dos: calculates the density-of-states of our energy landscape (typically just the minimum conduction band)
 + carr_density: calculates the (electron) charge carrier density landscape.  This has the upper limit of integration as E(kx,ky) instead of the standard E_fermi.
 + TRS_check: checks if an input system is time-reversal symmetric
