@@ -373,22 +373,25 @@ def carr_density(krange,en,en_dos,dos):
     Emin = np.min(en) # lower bound of integration of conduction band
     Emin_ind = np.argmin(np.abs(en_dos-Emin)) # finds energy index for lower bound in en_dos
 
-    for kx in range(en.shape[1]):
-        for ky in range(en.shape[0]):
+    # Performs our desired integral for all possible limits (all possible chemical potentials) in krange.
+    carr_integral = np.zeros(en_dos.shape)
+    for Emax_ind in prange(len(en_dos)):
 
-            # Performs integral for a fixed (kx,ky)
-            Emax = en[ky][kx] # upper limit of integration
-            Emax_ind = np.argmin(np.abs(en_dos-Emax)) # finds energy index for current integration upper limit
-
-            # if this is a new energy value to integrate
-            for dos_val in dos[Emin_ind:Emax_ind+1]:
-                # Adds term in our Riemann integral when: Emin <= Eprime <= Emax
-                n[ky][kx] += dos_val*dE # number of k-points
+        for dos_val in dos[Emin_ind:Emax_ind+1]:
+            # Adds term in our Riemann integral when: Emin <= Eprime <= Emax
+            carr_integral[Emax_ind] += dos_val*dE # number of k-points
 
             # this last block is equivalent (but more efficient) to the following (easier to understand) block
             # for Eprime_ind,Eprime in enumerate(en_dos):
             #     if Emin <= Eprime and Eprime <= Emax:
             #         n[ky][kx] += dos[Eprime_ind]*dE
+    
+    # Now assigns previously calculated integrals to proper energies in k-grid
+    for kx in range(en.shape[1]):
+        for ky in range(en.shape[0]):
+            Emax = en[ky][kx] # upper limit of integration
+            Emax_ind = np.argmin(np.abs(en_dos-Emax)) # finds energy index for current integration upper limit
+            n[ky][kx] = carr_integral[Emax_ind]
 
     tot_pts = en.shape[0]*en.shape[1]
     a = 0.246*100 # 10^-9 cm ; lattice constant
