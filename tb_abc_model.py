@@ -36,7 +36,7 @@ class ABC_graphene(object):
         if valley not in [-1,1]:
             raise ValueError('Error: user-defined valley must be -1,1')
         
-    def create_H(self,kpi,Uext):
+    def create_H(self,kpi,onsite):
         """
         Creates our lower diagonal Hamiltonian matrix given our kpoint
         and external potential
@@ -44,7 +44,7 @@ class ABC_graphene(object):
         Parameters:
             kpi (complex): kpoint w.r.t. valley: kpi = xi*kx + i*ky
                 THIS MUST BE IN UNITS OF [k/G]
-            Uext (float): external potential between outermost layers [meV]
+            onsite (array): onsite energies (manipulate to take into account external electric fields) [meV]
 
         Returns:
             H (array,complex): Hamiltonian matrix
@@ -60,13 +60,10 @@ class ABC_graphene(object):
         # delta = 0 # [eV]
         # g = np.array([3.1,0.38,-0.0083,-0.29,-0.141,0,0])*1000 # gamma values [meV]
 
-        # values of u depend on external field, and are defined later
+        # values of u depend on external field, and are defined/calculated elsewhere
         nu = s3*g/2
 
         kpi *= G # [k] for standard input
-
-        # Puts external potential onto onsite-energies
-        u = np.linspace(-Uext/2,Uext/2,self.num_layers)
 
         H = np.zeros((2*self.num_layers,2*self.num_layers),dtype=complex64)
 
@@ -76,7 +73,7 @@ class ABC_graphene(object):
 
                 # main diagonal
                 if cind==rind:
-                    H[rind][cind] = u[int(rind/2)]
+                    H[rind][cind] = onsite[int(rind/2)]
                 # 1st off diagonal
                 if cind==(rind+1):
                     if rind%2==0:
@@ -106,14 +103,15 @@ class ABC_graphene(object):
 
         return np.conj(H).T # lower diagonal
 
-    def generate_cut(self,num_k,krange,Uext):
+    def generate_cut(self,num_k,krange,onsite):
         """
         Creates a cut of our energy landscape 
 
         Parameters:
             num_k (int): dimensionality of k-point partition
             krange (float): how far along our cut to analyze (k/G) 
-            Uext (float): external potential between outermost layers
+            onsite (list): if len(list)=1, will treat this as Uext [meV] and not account for screening.
+                           if len(list)>1, will treat this as the onsite energies [meV]
         
         Returns:
             energy_array (float): all energy eigenvalues along our cut
@@ -121,6 +119,13 @@ class ABC_graphene(object):
 
         kx_vals = np.linspace(krange,-krange,num_k)
         ky_vals = np.linspace(0,0,num_k)
+
+        if len(onsite)==1: # if not taking into account screening
+            u = np.linspace(-onsite[0]/2,onsite[0]/2,self.num_layers)
+        else: # if taking into account screening
+            if len(onsite) != self.num_layers:
+                raise ValueError('Dimension of onsite vector != 1 or number of layers')
+            u = np.array(onsite)
 
         # energy[band][k]
         energy = np.zeros((2*self.num_layers,num_k))
@@ -132,7 +137,7 @@ class ABC_graphene(object):
 
             #Creates hamiltonian
             kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
-            H = self.create_H(kpi,Uext)
+            H = self.create_H(kpi,u)
 
             eig = np.linalg.eigvalsh(H) # lower diagonal
             for band,en in enumerate(eig):
@@ -140,14 +145,15 @@ class ABC_graphene(object):
 
         return energy
 
-    def generate_grid(self,num_k,krange,Uext,output_vecs):
+    def generate_grid(self,num_k,krange,onsite,output_vecs):
         """
         Creates a 2x2 energy grid of the conduction band about our valley
 
         Parameters:
             num_k (int): dimensionality of k-point partition
             krange (float): analyze square grid of (-krange,krange) (units of k/G)
-            Uext (float): external potential between outermost layers
+            onsite (list): if len(onsite)=1, will treat this as Uext [meV] and not account for screening.
+                           if len(onsite)>1, will treat this as the onsite energies [meV]
             output_vecs (boolean): whether to output eigenvectors or not
 
         Returns:
@@ -159,7 +165,14 @@ class ABC_graphene(object):
         kx_vals = np.linspace(-krange,krange,num_k)
         ky_vals = np.linspace(-krange,krange,num_k)
 
-        energy_mesh = np.zeros((2*self.num_layers,num_k,num_k),dtype=float32)
+        if len(onsite)==1: # if not taking into account screening
+            u = np.linspace(-onsite[0]/2,onsite[0]/2,self.num_layers)
+        else: # if taking into account screening
+            if len(onsite) != self.num_layers:
+                raise ValueError('Dimension of onsite vector != 1 or number of layers')
+            u = np.array(onsite)
+
+        energy_mesh = np.zeros((2*self.num_layers,num_k,num_k))#,dtype=float32)
 
         # [ky][kx][band][coeff]
         energy_vecs = np.zeros((num_k,num_k,2*self.num_layers,2*self.num_layers),dtype=complex64)
@@ -169,7 +182,7 @@ class ABC_graphene(object):
 
                 # Creates Hamiltonian
                 kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
-                H = self.create_H(kpi,Uext)
+                H = self.create_H(kpi,u)
 
                 # assumes bottom half of bands occupied and top half of bands are filled
                 
@@ -403,6 +416,28 @@ def carr_density(krange,en,en_dos,dos):
     # Multiplies factors from original integration over (kx,ky)
 
     return n/(2*pi)**2
+
+def hartree_screening(num_layers,Eapplied):
+    """
+    Determines onsite energies taking into account screening.  Implimented from:
+    - PHYSICAL REVIEW B 81, 125304 (2010)
+    - PHYSICAL REVIEW B 80, 195401 (2009)
+
+    Parameters:
+        num_layers (int): number of layers in slab
+        Eapplied (float): applied electric field [e_0^-1 V/nm]
+     
+    Returns:
+        onsite (array): onsite energies [meV]
+    """
+
+    interlayer_distance = 0.335 # [nm] https://doi.org/10.1103/PhysRevB.82.035409
+
+    # Initial guess
+    Uext = 1e3 * 3*interlayer_distance*Eapplied
+    onsite = np.linspace(-Uext/2,Uext/2,num_layers)
+
+    raise NotImplementedError
 
 @njit
 def find_surface_recombination(grid):
