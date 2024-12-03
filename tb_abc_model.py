@@ -255,16 +255,16 @@ class ABC_graphene(object):
 
         return Uopt,en_flat
 
-    def pot2disp(self,delta): 
+    def pot2el(self,delta): 
         """
-        Converts 'potential difference between outermost layers' to displacement field between two parallel plates.
+        Converts 'potential difference between outermost layers' to electric field (= D/epsilon_0) between two parallel plates.
         This effecively goes between the theoretical and experimental data.
 
         Parameters: 
             delta (float): the potential difference between outermost layers [meV]
 
         Returns:
-            disp (float): the displacement field [e_0^-1 V/nm]
+            el (float): the electric field [V/nm]
         """
 
         interlayer_distance = 0.335 # [nm] https://doi.org/10.1103/PhysRevB.82.035409
@@ -276,13 +276,13 @@ class ABC_graphene(object):
 
         return delta/1e3/(self.num_layers-1)/interlayer_distance*graphite_const
     
-    def disp2pot(self,disp):
+    def disp2pot(self,el):
         """
-        Converts displacement field between two parallel plates to 'potential difference between outermost layers'
+        Converts electric field (= D/epsilon_0) between two parallel plates to 'potential difference between outermost layers'
         This effecively goes between the experimental and theoretical data.
 
         Parameters:
-            disp (float): the displacement field [e_0^-1 V/nm]
+            el (float): the displacement field [V/nm]
 
         Returns: 
             delta (float): the potential difference between outermost layers [meV]
@@ -295,7 +295,7 @@ class ABC_graphene(object):
         # For a constant applied electric field (assumed here), potential difference is
         # delta = 1000* (num_layers-1)*(interlayer_distance)/dielectric * E
 
-        return 1e3*disp*(self.num_layers-1)*interlayer_distance/graphite_const
+        return 1e3*el*(self.num_layers-1)*interlayer_distance/graphite_const
         
 
 @njit
@@ -363,8 +363,91 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
 
     return en_out , dos/dE # number of counts per energy bin
 
+# @njit
+def generate_pdos(en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
+    """
+    Generates the partial density of states (PDOS) for our electronic bandstructure
+
+    Parameters:
+        en (array): energy array from one energy band of standard ouput of self.generate_grid
+        vecs (array): eigenvectors from one energy band standard output of self.generate_grid
+        dE (float): width of energy bin
+        Emin (float): minimum energy to analyze
+        Emax (float): maximum energy to analyze
+
+    Returns:
+        en_out (array,float): energy axis for our dos
+        pdos (array,float): partial density of electronic states (per spin)
+    """
+    
+    num_bins = round((Emax-Emin)/dE)
+    en_out = np.zeros(num_bins)
+    pdos = np.zeros((vecs.shape[2],num_bins)) # [coeff][bin]
+
+    if en.ndim == 2: # self.generate_grid (just lowest conduction band)
+        en_flat = en.flatten() # C order flattens all indices (ky,kx)
+        vec_flat = vecs.reshape(-1, vecs.shape[-1]) # C order flattens first all but last index (ky,kx)
+
+        for bin in prange(num_bins):
+            E0 = Emin + bin*dE
+            E1 = Emin + (bin+1)*dE
+            en_out[bin] = (E0+E1)/2
+            for energy_ind in range(len(en_flat)):
+                energy_val = en_flat[energy_ind]
+                if E0 <= energy_val and energy_val < E1:
+                    for coeff_ind,coeff in enumerate(vec_flat[energy_ind]):
+                        pdos[coeff_ind][bin] += np.abs(coeff)**2
+
+    return en_out , pdos/dE # number of counts per energy bin
+
 @njit
-def carr_density(krange,en,en_dos,dos):
+def carr_density(krange,fermi,en,en_dos,dos):
+    """
+    This calculates the charge carrier density landscape bound by the fermi momentum (kx,ky)
+    in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
+
+    n = (2pi)^-2 * int_{E_c}^{E_F} g(E') dE
+
+    Parameters:
+        krange (float): analyzing k-space from -krange to krange
+        fermi (float): Fermi energy (chemical potential).  aka the upper limit on our carrier density integrals
+        en (array,float): standard output for the energy from self.generate_grid(conduction band)
+        en_dos (array,float): standard output for the energy from self.generate_dos()
+        dos (array,float): standard output for the dos from self.generate_dos()
+
+    Returns:
+        n (float): electron carrier density [10^12 cm^-2]
+    """
+
+    dE = en_dos[1]-en_dos[0]
+    Emin = np.min(en) # lower bound of integration of conduction band
+    Emin_ind = np.argmin(np.abs(en_dos-Emin))  # finds energy index for lower bound in en_dos
+    Emax_ind = np.argmin(np.abs(en_dos-fermi)) # finds energy index for upper bound in en_dos
+
+    # Performs our desired integral in krange.
+    n = 0
+    for dos_val in dos[Emin_ind:Emax_ind+1]:
+        # Adds term in our Riemann integral when: Emin <= Eprime <= Emax
+        n += dos_val*dE # number of k-points
+
+        # this last block is equivalent (but more efficient) to the following (easier to understand) block
+        # for Eprime_ind,Eprime in enumerate(en_dos):
+        #     if Emin <= Eprime and Eprime <= Emax:
+        #         n += dos[Eprime_ind]*dE
+
+    tot_pts = en.shape[0]*en.shape[1]
+    a = 0.246*100 # 10^-9 cm ; lattice constant
+    area_per_pt = (2*krange)**2*(4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
+
+    # Now multiplies number of k-points by area per k-point
+    n *= area_per_pt
+
+    # Multiplies factors from original integration over (kx,ky)
+
+    return n/(2*pi)**2
+
+@njit
+def carr_density_contour(krange,en,en_dos,dos):
     """
     This calculates the charge carrier density landscape bound by the fermi momentum (kx,ky)
     in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
@@ -378,7 +461,7 @@ def carr_density(krange,en,en_dos,dos):
         dos (array,float): standard output for the dos from self.generate_dos()
 
     Returns:
-        n (array,float): a grid storing the carrier density.  Same dimensions as en
+        n (array,float): a grid storing the carrier density.  Same dimensions as en  [10^12 cm^-2]
     """
 
     n = np.zeros(en.shape)
@@ -417,27 +500,120 @@ def carr_density(krange,en,en_dos,dos):
 
     return n/(2*pi)**2
 
-def hartree_screening(num_layers,Eapplied):
+def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_crit=1e-5):
     """
     Determines onsite energies taking into account screening.  Implimented from:
     - PHYSICAL REVIEW B 81, 125304 (2010)
     - PHYSICAL REVIEW B 80, 195401 (2009)
 
     Parameters:
-        num_layers (int): number of layers in slab
-        Eapplied (float): applied electric field [e_0^-1 V/nm]
+        model (class): this is a class as defined by ABC_graphene(num_layers,valley)
+        E_applied (float): applied electric field (aka D/epsilon_0) [V/nm]
+        num_k (int): dimensionality of k-point partition
+        krange (float): analyze square grid of (-krange,krange) (units of k/G)
+        dE (float): energy bin width for PDOS calculation
+        fermi (float): Fermi energy (chemical potential).  aka the upper limit on our carrier density integrals
+        maxiter (int): maximum number of iterations
+        conv_crit (float): convergence criteria for scf process
      
     Returns:
         onsite (array): onsite energies [meV]
     """
 
+    print('---------------------------------',flush=True)
+    print('Starting screening calculation')
+
     interlayer_distance = 0.335 # [nm] https://doi.org/10.1103/PhysRevB.82.035409
+    e_over_2e0 = 1.602/2/8.854 # electron-charge/2/e0 ; x10^-12 V/nm (cm^2)
 
-    # Initial guess
-    Uext = 1e3 * 3*interlayer_distance*Eapplied
-    onsite = np.linspace(-Uext/2,Uext/2,num_layers)
+    # Initial guess for onsite energies
+    Uext = 1e3 * (model.num_layers-1)*interlayer_distance*E_applied # [meV]
+    Uext = 104.7458 # TESTING VALUE
+    onsite = list(np.linspace(-Uext/2,Uext/2,model.num_layers)) # list for proper input data-type for generate_grid
+    onsite = [0.0,0.0,0.0,0.0] # testing
 
-    raise NotImplementedError
+    converged = False # establishes convergence logic
+    for iter in range(maxiter):
+        print(f'    Step {iter}:',flush=True)
+        print(f'        Onsite: {onsite}',flush=True)
+
+        # Calculates energy grid
+        # print('        Calculating eigensystem',flush=True)
+        en_grid,en_vecs = model.generate_grid(num_k,krange,onsite,True)
+
+        # Pulls out just conduction band data
+        cond_band_en = en_grid[model.num_layers]
+        cond_band_vec = np.zeros((num_k,num_k,2*model.num_layers),dtype=complex) # [ky][kx][coeff]
+        for kx in range(num_k):
+            for ky in range(num_k):
+                cond_band_vec[ky][kx] = en_vecs[ky][kx][model.num_layers]
+
+        # Calculates PDOS for conduction band
+        # print('        Calculating partial density of states',flush=True)
+        Emin = np.min(cond_band_en)
+
+        en_pdos,pdos = generate_pdos(en=cond_band_en,vecs=cond_band_vec,dE=dE,Emin=Emin,Emax=fermi) # just conduction band
+        
+        # Calculates carrier density for each layer
+        electron_density = np.zeros(model.num_layers)
+        for layer in range(model.num_layers):
+            # sublattice A
+            # print(f'        Calculating carrier density for layer {layer+1} sublattice A',flush=True)
+            electron_density_A = carr_density(krange=krange,fermi=fermi,en=cond_band_en,en_dos=en_pdos,dos=pdos[2*layer])
+            # sublattice B
+            # print(f'        Calculating carrier density for layer {layer+1} sublattice B',flush=True)
+            electron_density_B = carr_density(krange=krange,fermi=fermi,en=cond_band_en,en_dos=en_pdos,dos=pdos[2*layer+1])
+            # combining results from both sublattices
+            electron_density[layer] = electron_density_A + electron_density_B # [x10^12 cm^-2]
+
+        # Calculates new (screening) electric field between layers
+        E_new = np.zeros(model.num_layers-1) # will store new electric fields between layers
+        for E_ind in range(model.num_layers-1):
+            E_new[E_ind] -= sum(electron_density[:E_ind+1]) # subtracts densities below space (since electrons pull electric field down)
+            E_new[E_ind] += sum(electron_density[E_ind+1:]) # adds densities above space (since electrons pull electric field up)
+        E_new *= e_over_2e0 # [V/nm]          
+
+        # Calculates new onsite terms from calculated carrier densities
+        # print('        Determining new onsite terms',flush=True)
+        onsite_new = [0.0]
+        for layer in range(model.num_layers-1): # goes over all but bottom layer, we will center results later
+            # V = (E_applied+E_new[layer])*interlayer_distance # [V]
+            V = E_new[layer]*interlayer_distance # [V]
+            onsite_new.append(V) # x1 [e] = [eV]
+
+        Uext_onsite = np.linspace(-Uext/2,Uext/2,model.num_layers) # DELETE LATER
+        for ind in range(len(onsite_new)):
+            onsite_new[ind] += Uext_onsite[ind]
+        
+        # Centering onsite terms about zero energy
+        onsite_new_avg = sum(onsite_new)/len(onsite_new)
+        for ind in range(len(onsite_new)):
+            onsite_new[ind] -= onsite_new_avg
+        
+        # Checks convergence criteria
+        diff = 0
+        for layer in range(model.num_layers):
+            diff += abs(onsite_new[layer] - onsite[layer])
+
+        # Sets up next step
+        for onsite_ind,onsite_val in enumerate(onsite_new):
+            onsite[onsite_ind] = onsite_val # for-loop avoids pointer issue when copying lists
+
+        if diff <= conv_crit: # if difference is less than the convergence criterion
+            converged = True
+            break
+
+    if converged is True:
+        print('Hartree process converged',flush=True)
+        print('Self Consistent Electric fields:',flush=True)
+        print(f'    Ext = {np.round(2*Uext_onsite[-1]/3000/interlayer_distance,6)} V/nm')
+        print(f'    E12 = {np.round(E_new[0],6)} V/nm',flush=True)
+        print(f'    E23 = {np.round(E_new[1],6)} V/nm',flush=True)
+        print(f'    E34 = {np.round(E_new[2],6)} V/nm',flush=True)
+    else:
+        print('Hartree process did not converge',flush=True)
+
+    return onsite
 
 @njit
 def find_surface_recombination(grid):
