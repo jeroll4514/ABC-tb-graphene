@@ -4,6 +4,7 @@ import numpy as np
 from numba.experimental import jitclass # for the class structure
 from numba import njit,prange # for extra functions
 from numba import int32,float32,complex64
+import time
 
 #Establishes constants
 pi = np.pi
@@ -363,7 +364,7 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
 
     return en_out , dos/dE # number of counts per energy bin
 
-# @njit
+@njit
 def generate_pdos(en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
     """
     Generates the partial density of states (PDOS) for our electronic bandstructure
@@ -419,10 +420,13 @@ def carr_density(krange,fermi,en,en_dos,dos):
         n (float): electron carrier density [10^12 cm^-2]
     """
 
+    if abs(fermi) < 1e-4: # all integrals will vanish, this just speeds up the process
+        return 0.0
+
     dE = en_dos[1]-en_dos[0]
     Emin = np.min(en) # lower bound of integration of conduction band
     Emin_ind = np.argmin(np.abs(en_dos-Emin))  # finds energy index for lower bound in en_dos
-    Emax_ind = np.argmin(np.abs(en_dos-fermi)) # finds energy index for upper bound in en_dos
+    Emax_ind = np.argmin(np.abs(en_dos-fermi)) # finds energy index for upper bound in en_dos (also works when fermi > max(en_dos), just returns last index)
 
     # Performs our desired integral in krange.
     n = 0
@@ -530,7 +534,7 @@ def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_cri
     Uext = 1e3 * (model.num_layers-1)*interlayer_distance*E_applied # [meV]
     Uext = 104.7458 # TESTING VALUE
     onsite = list(np.linspace(-Uext/2,Uext/2,model.num_layers)) # list for proper input data-type for generate_grid
-    onsite = [0.0,0.0,0.0,0.0] # testing
+    # onsite = [0.0,0.0,0.0,0.0] # testing
 
     converged = False # establishes convergence logic
     for iter in range(maxiter):
@@ -538,8 +542,18 @@ def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_cri
         print(f'        Onsite: {onsite}',flush=True)
 
         # Calculates energy grid
-        # print('        Calculating eigensystem',flush=True)
+        print('        Calculating eigensystem',flush=True)
         en_grid,en_vecs = model.generate_grid(num_k,krange,onsite,True)
+
+        # Calculates PDOS for valence bands (undoped)
+        # Pulls out just valence bands data
+        val_bands_vec = np.zeros((model.num_layers,num_k,num_k,2*model.num_layers),dtype=complex) # [band][ky][kx][coeff]
+        for band in range(model.num_layers):
+            for kx in range(num_k):
+                for ky in range(num_k):
+                    val_bands_vec[band][ky][kx] = en_vecs[ky][kx][band]
+
+        valence_electron_density = np.zeros((model.num_layers,model.num_layers)) # [band][layer]
 
         # Pulls out just conduction band data
         cond_band_en = en_grid[model.num_layers]
@@ -549,22 +563,34 @@ def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_cri
                 cond_band_vec[ky][kx] = en_vecs[ky][kx][model.num_layers]
 
         # Calculates PDOS for conduction band
-        # print('        Calculating partial density of states',flush=True)
+        print('        Calculating partial density of states',flush=True)
         Emin = np.min(cond_band_en)
 
         en_pdos,pdos = generate_pdos(en=cond_band_en,vecs=cond_band_vec,dE=dE,Emin=Emin,Emax=fermi) # just conduction band
         
         # Calculates carrier density for each layer
+
+        prog_bar = '-' * 2*model.num_layers # progress bar
         electron_density = np.zeros(model.num_layers)
+        print(f'        Calculating carrier density: [{prog_bar}] {np.round(0/model.num_layers*100,2)}%',end="\r",flush=True)
         for layer in range(model.num_layers):
             # sublattice A
-            # print(f'        Calculating carrier density for layer {layer+1} sublattice A',flush=True)
             electron_density_A = carr_density(krange=krange,fermi=fermi,en=cond_band_en,en_dos=en_pdos,dos=pdos[2*layer])
+
+            prog_bar = 'X' * (2*layer+1) + '-' * (2*model.num_layers-2*layer-1)
+            print(f'        Calculating carrier density: [{prog_bar}] {np.round((layer+0.5)/model.num_layers*100,2)}%',end="\r",flush=True)
+            time.sleep(1)
+
             # sublattice B
-            # print(f'        Calculating carrier density for layer {layer+1} sublattice B',flush=True)
             electron_density_B = carr_density(krange=krange,fermi=fermi,en=cond_band_en,en_dos=en_pdos,dos=pdos[2*layer+1])
             # combining results from both sublattices
             electron_density[layer] = electron_density_A + electron_density_B # [x10^12 cm^-2]
+
+            prog_bar = 'X' * (2*layer+2) + '-' * (2*model.num_layers-2*layer-2)
+            print(f'        Calculating carrier density: [{prog_bar}] {np.round((layer+1)/model.num_layers*100,2)}%',end="\r",flush=True)
+            time.sleep(1)
+
+        print('') # output goes to next line
 
         # Calculates new (screening) electric field between layers
         E_new = np.zeros(model.num_layers-1) # will store new electric fields between layers
@@ -574,12 +600,12 @@ def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_cri
         E_new *= e_over_2e0 # [V/nm]          
 
         # Calculates new onsite terms from calculated carrier densities
-        # print('        Determining new onsite terms',flush=True)
+        print('        Determining new onsite terms',flush=True)
         onsite_new = [0.0]
         for layer in range(model.num_layers-1): # goes over all but bottom layer, we will center results later
             # V = (E_applied+E_new[layer])*interlayer_distance # [V]
             V = E_new[layer]*interlayer_distance # [V]
-            onsite_new.append(V) # x1 [e] = [eV]
+            onsite_new.append(V) # * 1[e] = [eV]
 
         Uext_onsite = np.linspace(-Uext/2,Uext/2,model.num_layers) # DELETE LATER
         for ind in range(len(onsite_new)):
