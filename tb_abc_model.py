@@ -5,9 +5,11 @@ from numba.experimental import jitclass # for the class structure
 from numba import njit,prange # for extra functions
 from numba import int32,float32,complex64
 import time
+import matplotlib.pyplot as plt
 
 #Establishes constants
 pi = np.pi
+s2 = np.sqrt(2)
 s3 = np.sqrt(3)
 G = 4*pi/s3 # [1/a]
 
@@ -19,8 +21,7 @@ spec = [
 @jitclass(spec)
 class ABC_graphene(object):
     """
-    A class to create a tight-binding model for
-    ABC stacked graphene about the K(K') point
+    A class to create a tight-binding model for ABC stacked graphene about the K(K') point
 
     Parameters:
         num_layers (int): number of layers (>=3)
@@ -39,8 +40,7 @@ class ABC_graphene(object):
         
     def create_H(self,kpi,onsite):
         """
-        Creates our lower diagonal Hamiltonian matrix given our kpoint
-        and external potential
+        Creates our lower diagonal Hamiltonian matrix given our kpoint and external potential
 
         Parameters:
             kpi (complex): kpoint w.r.t. valley: kpi = xi*kx + i*ky
@@ -133,8 +133,8 @@ class ABC_graphene(object):
         for k in range(num_k):
 
             # Defines kpoints
-            kx = kx_vals[k] # k/G
-            ky = ky_vals[k] # k/G
+            kx = kx_vals[k] # [k/G]
+            ky = ky_vals[k] # [k/G]
 
             #Creates hamiltonian
             kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
@@ -148,7 +148,7 @@ class ABC_graphene(object):
 
     def generate_grid(self,num_k,krange,onsite,output_vecs):
         """
-        Creates a 2x2 energy grid of the conduction band about our valley
+        Creates a two-dimensional energy grid of the conduction band about our valley
 
         Parameters:
             num_k (int): dimensionality of k-point partition
@@ -173,13 +173,14 @@ class ABC_graphene(object):
                 raise ValueError('Dimension of onsite vector != 1 or number of layers')
             u = np.array(onsite)
 
+        # [band][ky][kx]
         energy_mesh = np.zeros((2*self.num_layers,num_k,num_k))#,dtype=float32)
 
         # [ky][kx][band][coeff]
         energy_vecs = np.zeros((num_k,num_k,2*self.num_layers,2*self.num_layers),dtype=complex64)
 
-        for ii,kx in enumerate(kx_vals):
-            for jj,ky in enumerate(ky_vals):
+        for kx_ind,kx in enumerate(kx_vals):
+            for ky_ind,ky in enumerate(ky_vals):
 
                 # Creates Hamiltonian
                 kpi = self.valley*kx + 1j*ky # pi = xi*kx + iky from literature
@@ -193,11 +194,11 @@ class ABC_graphene(object):
                     eig,vec = np.linalg.eigh(H) # lower diagonal
 
                 for band,val in enumerate(eig):
-                    energy_mesh[band][jj][ii] = val
+                    energy_mesh[band][ky_ind][kx_ind] = val
                 
                 if output_vecs is True:
                     for band in range(2*self.num_layers):
-                        energy_vecs[jj][ii][band] = vec[:,band]
+                        energy_vecs[ky_ind][kx_ind][band] = vec[:,band]
 
         return energy_mesh,energy_vecs
     
@@ -365,27 +366,47 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
     return en_out , dos/dE # number of counts per energy bin
 
 @njit
-def generate_pdos(en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
+def generate_pdos(model,en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
     """
     Generates the partial density of states (PDOS) for our electronic bandstructure
 
     Parameters:
+        model (class): this is a class as defined by ABC_graphene(num_layers,valley)
         en (array): energy array from one energy band of standard ouput of self.generate_grid
         vecs (array): eigenvectors from one energy band standard output of self.generate_grid
-        dE (float): width of energy bin
-        Emin (float): minimum energy to analyze
-        Emax (float): maximum energy to analyze
+        dE (float): width of energy bin [same unit as en]
+        Emin (float): minimum energy to analyze [same unit as en]
+        Emax (float): maximum energy to analyze [same unit as en]
 
     Returns:
         en_out (array,float): energy axis for our dos
         pdos (array,float): partial density of electronic states (per spin)
     """
     
+    # finds band minimum/maximum within cutoff momentum (circle)
+    k_radius = en.shape[0]/2
+    band_minimum,band_maximum = Emax,Emin # initial guess, will be overwritten in this block (switched max-min so first step in loop declares)
+    for ky in range(en.shape[0]):
+        for kx in range(en.shape[1]):
+            if (kx-k_radius)**2 + (ky-k_radius)**2 <= k_radius**2: # if we are within cutoff momentum
+                if en[ky][kx] < band_minimum:
+                    band_minimum = en[ky][kx]
+                if en[ky][kx] > band_maximum:
+                    band_maximum = en[ky][kx]
+
+    Emin = max(band_minimum,Emin) # only analyzes the band, even if declared Emin goes below band minimum
+    Emax = min(band_maximum,Emax) # only analyzes the band, even if declared Emax goes above band maximum
+
+    for ky in range(en.shape[0]):
+        for kx in range(en.shape[1]):
+            if (kx-k_radius)**2 + (ky-k_radius)**2 > k_radius**2: # if we are outside cutoff momentum
+                en[ky][kx] = band_minimum - 1 # ensures later summations exclude momentums outside the cutoff
+
     num_bins = round((Emax-Emin)/dE)
     en_out = np.zeros(num_bins)
     pdos = np.zeros((vecs.shape[2],num_bins)) # [coeff][bin]
 
-    if en.ndim == 2: # self.generate_grid (just lowest conduction band)
+    if en.ndim == 2: # self.generate_grid (just one band)
         en_flat = en.flatten() # C order flattens all indices (ky,kx)
         vec_flat = vecs.reshape(-1, vecs.shape[-1]) # C order flattens first all but last index (ky,kx)
 
@@ -397,51 +418,37 @@ def generate_pdos(en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
                 energy_val = en_flat[energy_ind]
                 if E0 <= energy_val and energy_val < E1:
                     for coeff_ind,coeff in enumerate(vec_flat[energy_ind]):
-                        pdos[coeff_ind][bin] += np.abs(coeff)**2
+                        pdos[coeff_ind][bin] += np.abs(coeff)**2 - 1/2/model.num_layers
 
     return en_out , pdos/dE # number of counts per energy bin
 
 @njit
-def carr_density(krange,fermi,en,en_dos,dos):
+def carr_density(krange,en,en_dos,dos):
     """
     This calculates the charge carrier density landscape bound by the fermi momentum (kx,ky)
     in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
 
-    n = (2pi)^-2 * int_{E_c}^{E_F} g(E') dE
+    n = (2pi)^-2 * (area per kpoint) * int_{E_min}^{E_F} g(E') dE
 
     Parameters:
         krange (float): analyzing k-space from -krange to krange
-        fermi (float): Fermi energy (chemical potential).  aka the upper limit on our carrier density integrals
-        en (array,float): standard output for the energy from self.generate_grid(conduction band)
-        en_dos (array,float): standard output for the energy from self.generate_dos()
-        dos (array,float): standard output for the dos from self.generate_dos()
+        en (array,float): standard output for the energy from self.generate_grid(one band)
+        en_dos (array,float): standard output for the energy from generate_dos() or generate_pdos()
+        dos (array,float): standard output for the dos from generate_dos() or generate_pdos()
 
     Returns:
         n (float): electron carrier density [10^12 cm^-2]
     """
 
-    if abs(fermi) < 1e-4: # all integrals will vanish, this just speeds up the process
-        return 0.0
+    dE = en_dos[1]-en_dos[0] # uniform sampling here, so index 1 and 0 are arbitrary; we just need index n+1 and n
 
-    dE = en_dos[1]-en_dos[0]
-    Emin = np.min(en) # lower bound of integration of conduction band
-    Emin_ind = np.argmin(np.abs(en_dos-Emin))  # finds energy index for lower bound in en_dos
-    Emax_ind = np.argmin(np.abs(en_dos-fermi)) # finds energy index for upper bound in en_dos (also works when fermi > max(en_dos), just returns last index)
-
-    # Performs our desired integral in krange.
-    n = 0
-    for dos_val in dos[Emin_ind:Emax_ind+1]:
-        # Adds term in our Riemann integral when: Emin <= Eprime <= Emax
-        n += dos_val*dE # number of k-points
-
-        # this last block is equivalent (but more efficient) to the following (easier to understand) block
-        # for Eprime_ind,Eprime in enumerate(en_dos):
-        #     if Emin <= Eprime and Eprime <= Emax:
-        #         n += dos[Eprime_ind]*dE
+    n = 0.0
+    for dos_val in dos: # proper upper/lower integration bounds are already established when calculating en_dos
+        n += dos_val*dE
 
     tot_pts = en.shape[0]*en.shape[1]
     a = 0.246*100 # 10^-9 cm ; lattice constant
-    area_per_pt = (2*krange)**2*(4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
+    area_per_pt = (2*krange * 4*pi/s3/a)**2 / tot_pts * 1e6 # 10^12 cm^-2
 
     # Now multiplies number of k-points by area per k-point
     n *= area_per_pt
@@ -456,10 +463,10 @@ def carr_density_contour(krange,en,en_dos,dos):
     This calculates the charge carrier density landscape bound by the fermi momentum (kx,ky)
     in the low temperature limit (where the Fermi-dirac distribution f(E) -> 1).
 
-    n = (2pi)^-2 * int_{E_c}^E(kx,ky) g(E') dE
+    n = (2pi)^-2 * (area per kpoint) *  int_{E_c}^E(kx,ky) g(E') dE
 
     Parameters:
-        krange (float): analyzing k-space from -krange to krange
+        krange (float): analyzing k-space from -krange to krange [k/G]
         en (array,float): standard output for the energy from self.generate_grid(conduction band)
         en_dos (array,float): standard output for the energy from self.generate_dos()
         dos (array,float): standard output for the dos from self.generate_dos()
@@ -481,10 +488,10 @@ def carr_density_contour(krange,en,en_dos,dos):
             # Adds term in our Riemann integral when: Emin <= Eprime <= Emax
             carr_integral[Emax_ind] += dos_val*dE # number of k-points
 
-            # this last block is equivalent (but more efficient) to the following (easier to understand) block
-            # for Eprime_ind,Eprime in enumerate(en_dos):
-            #     if Emin <= Eprime and Eprime <= Emax:
-            #         n[ky][kx] += dos[Eprime_ind]*dE
+        # this last block is equivalent (but more efficient) to the following (easier to understand) block
+        # for Eprime_ind,Eprime in enumerate(en_dos):
+        #     if Emin <= Eprime and Eprime <= Emax:
+        #         n[ky][kx] += dos[Eprime_ind]*dE
     
     # Now assigns previously calculated integrals to proper energies in k-grid
     for kx in range(en.shape[1]):
@@ -495,7 +502,7 @@ def carr_density_contour(krange,en,en_dos,dos):
 
     tot_pts = en.shape[0]*en.shape[1]
     a = 0.246*100 # 10^-9 cm ; lattice constant
-    area_per_pt = (2*krange)**2*(4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
+    area_per_pt = (2*krange * 4*pi/s3/a)**2/tot_pts * 1e6 # 10^12 cm^-2
 
     # Now multiplies number of k-points by area per k-point
     n *= area_per_pt
@@ -504,7 +511,7 @@ def carr_density_contour(krange,en,en_dos,dos):
 
     return n/(2*pi)**2
 
-def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_crit=1e-5):
+def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_crit=1e-4,rounding=4):
     """
     Determines onsite energies taking into account screening.  Implimented from:
     - PHYSICAL REVIEW B 81, 125304 (2010)
@@ -517,126 +524,171 @@ def hartree_screening(model,E_applied,num_k,krange,dE,fermi,maxiter=100,conv_cri
         krange (float): analyze square grid of (-krange,krange) (units of k/G)
         dE (float): energy bin width for PDOS calculation
         fermi (float): Fermi energy (chemical potential).  aka the upper limit on our carrier density integrals
+        mix (float): mixing weight, the percentage of the NEW step to include: x1 = (1-mix)*x0 + mix*x1
         maxiter (int): maximum number of iterations
         conv_crit (float): convergence criteria for scf process
+        rounding (int): number of digits to round resultant onsite energies to
      
     Returns:
         onsite (array): onsite energies [meV]
     """
 
-    print('---------------------------------',flush=True)
+    if (10**(-rounding) < conv_crit):
+        raise ValueError('Convergence criterion is more accurate than the rounding')
+
+    print('------------------------------------------------------------------',flush=True)
     print('Starting screening calculation')
 
+    k_cutoff = 1/2/pi * (0.502/3.16) # [k/G] cutoff momentum such that furthest points out on our circle satisfy k = gamma1/nu0
     interlayer_distance = 0.335 # [nm] https://doi.org/10.1103/PhysRevB.82.035409
-    e_over_2e0 = 1.602/2/8.854 # electron-charge/2/e0 ; x10^-12 V/nm (cm^2)
+    e_over_2e0 = 1.6021766/2/8.8541878 # electron-charge/2/e0 ; x10^-12 V/nm (cm^2)
+    kappa_interlayer = 1 # permittivity of space between layers ; 1 for vacuum, 2.3 for system on SiO2 ; PHYSICAL REVIEW B 80, 195401 (2009)
+    buffer = 0.01 # seconds to wait after printing update
 
     # Initial guess for onsite energies
-    Uext = 1e3 * (model.num_layers-1)*interlayer_distance*E_applied # [meV]
-    Uext = 104.7458 # TESTING VALUE
-    onsite = list(np.linspace(-Uext/2,Uext/2,model.num_layers)) # list for proper input data-type for generate_grid
-    # onsite = [0.0,0.0,0.0,0.0] # testing
+    U_ext = 1e3 * (model.num_layers-1)*interlayer_distance*E_applied # [meV]
+    U_ext = 100.0 # [meV] TESTING VALUE
+    onsite_ext = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # onsite energy contribution from external electric field [meV]
+    onsite = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # list for proper input data-type for generate_grid ; will be overwritten below ; [meV]
 
     converged = False # establishes convergence logic
     for iter in range(maxiter):
         print(f'    Step {iter}:',flush=True)
-        print(f'        Onsite: {onsite}',flush=True)
+        print(f'        Onsite: {onsite} meV',flush=True)
 
         # Calculates energy grid
         print('        Calculating eigensystem',flush=True)
-        en_grid,en_vecs = model.generate_grid(num_k,krange,onsite,True)
+        en_grid,en_vecs = model.generate_grid(num_k,k_cutoff,onsite,True)
 
-        # Calculates PDOS for valence bands (undoped)
-        # Pulls out just valence bands data
-        val_bands_vec = np.zeros((model.num_layers,num_k,num_k,2*model.num_layers),dtype=complex) # [band][ky][kx][coeff]
-        for band in range(model.num_layers):
+        # Calculates PDOS for bands
+        prog_bar = '-' * (model.num_layers+1) # progress bar
+        print(f'        Calculating partial density of states: [{prog_bar}] 0.0%',end="\r",flush=True)
+        time.sleep(buffer)
+
+        en_pdos = list() # [band][energy values]
+        pdos = list()    # [band][coeff][pdos values]
+        # for band in range(model.num_layers+1): # iterates over all valence bands + lowest conduction band
+        for band in range(model.num_layers): # iterates over all valence bands
+            vecs = np.zeros((num_k,num_k,2*model.num_layers),dtype=complex) # [ky][kx][coeff] for current band
             for kx in range(num_k):
                 for ky in range(num_k):
-                    val_bands_vec[band][ky][kx] = en_vecs[ky][kx][band]
+                    vecs[ky][kx] = en_vecs[ky][kx][band]
 
-        valence_electron_density = np.zeros((model.num_layers,model.num_layers)) # [band][layer]
+            band_square_min = np.min(en_grid[band]) # minimum of the band on a square grid.  
+                                                    # This function will then find it for the inscribed circle (max momentum cutoff)
+            en_pdos_append,pdos_append = generate_pdos(model,en=en_grid[band],vecs=vecs,dE=dE,Emin=band_square_min,Emax=fermi)
 
-        # Pulls out just conduction band data
-        cond_band_en = en_grid[model.num_layers]
-        cond_band_vec = np.zeros((num_k,num_k,2*model.num_layers),dtype=complex) # [ky][kx][coeff]
-        for kx in range(num_k):
-            for ky in range(num_k):
-                cond_band_vec[ky][kx] = en_vecs[ky][kx][model.num_layers]
+            # Stores energies/pdos for each band
+            en_pdos.append(en_pdos_append)
+            pdos.append(pdos_append)
 
-        # Calculates PDOS for conduction band
-        print('        Calculating partial density of states',flush=True)
-        Emin = np.min(cond_band_en)
+            prog_bar = 'X'*(band+1) + '-' * (model.num_layers+1-(band+1)) # progress bar
+            print(f'        Calculating partial density of states: [{prog_bar}] {np.round((band+1)/(model.num_layers+1)*100,2)}%',end="\r",flush=True)
+            time.sleep(buffer)
 
-        en_pdos,pdos = generate_pdos(en=cond_band_en,vecs=cond_band_vec,dE=dE,Emin=Emin,Emax=fermi) # just conduction band
+        print('') # terminal goes to next line
+
+        # Calculates carrier density for each band in each layer
+
+        # electron_density = np.zeros((model.num_layers+1,model.num_layers)) # [band][layer]
+        # for band in range(model.num_layers+1): # iterates over all valence bands + lowest conduction band
+
+        prog_bar = '-' * model.num_layers # progress bar
+        print(f'        Calculating carrier densities: [{prog_bar}] {np.round(0/model.num_layers*100,2)}%',end="\r",flush=True)
+        time.sleep(buffer)
+
+        electron_density_components = np.zeros((model.num_layers,model.num_layers)) # [band][layer]
+        for band in range(model.num_layers): # iterates over all valence bands
+            for layer in range(model.num_layers):
+
+                # sublattice A
+                electron_density_A = carr_density(krange=k_cutoff,en=en_grid[band],en_dos=en_pdos[band],dos=pdos[band][2*layer]) # [x10^12 cm^-2]
+
+                # sublattice B
+                electron_density_B = carr_density(krange=k_cutoff,en=en_grid[band],en_dos=en_pdos[band],dos=pdos[band][2*layer+1]) # [x10^12 cm^-2]
+
+                # combining results from both sublattices
+                electron_density_components[band][layer] = electron_density_A + electron_density_B # [x10^12 cm^-2]
+
+            prog_bar = 'X' * (band+1) + '-' * (model.num_layers-band-1)
+            print(f'        Calculating carrier densities: [{prog_bar}] {np.round((band+1)/model.num_layers*100,2)}%',end="\r",flush=True)
+            time.sleep(buffer)
+
+        print('') # terminal goes to next line
         
-        # Calculates carrier density for each layer
+        # This block uses electron densities in all layers to determine screened electric field.
+        # Finds electron density for each layer (sums over all valence bands per layer)
+        electron_density = list() # [layer]
+        for layer in range(model.num_layers): # iterates over all layers
+            electron_density.append(np.sum(electron_density_components[:,layer]))
 
-        prog_bar = '-' * 2*model.num_layers # progress bar
-        electron_density = np.zeros(model.num_layers)
-        print(f'        Calculating carrier density: [{prog_bar}] {np.round(0/model.num_layers*100,2)}%',end="\r",flush=True)
-        for layer in range(model.num_layers):
-            # sublattice A
-            electron_density_A = carr_density(krange=krange,fermi=fermi,en=cond_band_en,en_dos=en_pdos,dos=pdos[2*layer])
-
-            prog_bar = 'X' * (2*layer+1) + '-' * (2*model.num_layers-2*layer-1)
-            print(f'        Calculating carrier density: [{prog_bar}] {np.round((layer+0.5)/model.num_layers*100,2)}%',end="\r",flush=True)
-            time.sleep(1)
-
-            # sublattice B
-            electron_density_B = carr_density(krange=krange,fermi=fermi,en=cond_band_en,en_dos=en_pdos,dos=pdos[2*layer+1])
-            # combining results from both sublattices
-            electron_density[layer] = electron_density_A + electron_density_B # [x10^12 cm^-2]
-
-            prog_bar = 'X' * (2*layer+2) + '-' * (2*model.num_layers-2*layer-2)
-            print(f'        Calculating carrier density: [{prog_bar}] {np.round((layer+1)/model.num_layers*100,2)}%',end="\r",flush=True)
-            time.sleep(1)
-
-        print('') # output goes to next line
+        # print(f'        net_charge_density = {np.round(sum(electron_density),rounding)} x10^12 cm^-2')
+        print(f'        electron_density = {np.round(electron_density,rounding)} x10^12 cm^-2')
 
         # Calculates new (screening) electric field between layers
-        E_new = np.zeros(model.num_layers-1) # will store new electric fields between layers
-        for E_ind in range(model.num_layers-1):
-            E_new[E_ind] -= sum(electron_density[:E_ind+1]) # subtracts densities below space (since electrons pull electric field down)
-            E_new[E_ind] += sum(electron_density[E_ind+1:]) # adds densities above space (since electrons pull electric field up)
-        E_new *= e_over_2e0 # [V/nm]          
+        E_induced = np.zeros(model.num_layers-1) # will store new electric fields between layers from electrons
+
+        for space_ind in range(model.num_layers-1): # sums over space between layers
+
+            E_induced[space_ind] -= sum(electron_density[:space_ind+1]) # subtracts densities below space (since electrons pull electric field down)
+            E_induced[space_ind] += sum(electron_density[space_ind+1:]) # adds densities above space (since electrons pull electric field up)
+                
+        E_induced *= e_over_2e0 # [V/nm]   
+        E_induced /= kappa_interlayer # accounts for permittivity between layers 
+
+        # print(f'        Applied electric field: {Uext/( 1e3*(model.num_layers-1)*interlayer_distance )} V/nm' , flush=True)
+        # print(f'        (Induced) Electric field: {E_induced} V/nm' , flush=True)
 
         # Calculates new onsite terms from calculated carrier densities
-        print('        Determining new onsite terms',flush=True)
-        onsite_new = [0.0]
-        for layer in range(model.num_layers-1): # goes over all but bottom layer, we will center results later
-            # V = (E_applied+E_new[layer])*interlayer_distance # [V]
-            V = E_new[layer]*interlayer_distance # [V]
-            onsite_new.append(V) # * 1[e] = [eV]
+        onsite_new = list() # places zero voltage at halfway between outermost layers
+        if (model.num_layers%2 == 0): # for an even number of layers ; odd number of spaces
+            # for middle space
+            middle_space_index = model.num_layers//2-1
 
-        Uext_onsite = np.linspace(-Uext/2,Uext/2,model.num_layers) # DELETE LATER
-        for ind in range(len(onsite_new)):
-            onsite_new[ind] += Uext_onsite[ind]
+            V_upper = +E_induced[middle_space_index]*interlayer_distance/2
+            onsite_new.append(1000*V_upper) # 1000 * [V] * 1[e] = 1000*[eV] = [meV] ; upper-half
+
+            V_lower = -E_induced[middle_space_index]*interlayer_distance/2
+            onsite_new.insert(0,1000*V_lower) # lower-half
+
+            # remaining spaces
+            for space_index in range(1,(E_induced.shape[0]-1)//2+1):
+                V_upper += E_induced[middle_space_index + space_index]*(space_index*interlayer_distance)
+                onsite_new.append(1000*V_upper) # upper-half
+
+                V_lower -= E_induced[middle_space_index - space_index]*(space_index*interlayer_distance)
+                onsite_new.insert(0,1000*V_lower) # lower-half
+
+        else: # for an odd number of layers ; even number of spaces
+            raise NotImplementedError('An odd number of layers is not yet compatible with screening' , flush=True)
         
-        # Centering onsite terms about zero energy
-        onsite_new_avg = sum(onsite_new)/len(onsite_new)
-        for ind in range(len(onsite_new)):
-            onsite_new[ind] -= onsite_new_avg
-        
-        # Checks convergence criteria
-        diff = 0
-        for layer in range(model.num_layers):
-            diff += abs(onsite_new[layer] - onsite[layer])
+        # This now mixes result from prior step and this step.  It is standard for iterative processes, and helps avoid overshooting the true result
+        for ind in range(model.num_layers):
+            onsite_new[ind] = (1-mix)*onsite[ind] + mix*onsite_new[ind]
+
+        # Combines onsite energies from external field and induced fields
+        for ind,external_energy in enumerate(onsite_ext):
+            onsite_new[ind] += external_energy
+
+        # Stores array where each element is the difference between new and prior onsite energies (for convergence criterion)
+        diff = np.array(onsite_new)-np.array(onsite)
 
         # Sets up next step
-        for onsite_ind,onsite_val in enumerate(onsite_new):
-            onsite[onsite_ind] = onsite_val # for-loop avoids pointer issue when copying lists
+        for onsite_ind,onsite_val in enumerate(onsite_new): # for-loop avoids pointer issue when copying lists
+            onsite[onsite_ind] = np.round(onsite_val,rounding)
 
-        if diff <= conv_crit: # if difference is less than the convergence criterion
+        if np.max(abs(diff)) <= conv_crit: # if maximum difference is less than the convergence criterion
             converged = True
             break
 
     if converged is True:
+        print('')
         print('Hartree process converged',flush=True)
         print('Self Consistent Electric fields:',flush=True)
-        print(f'    Ext = {np.round(2*Uext_onsite[-1]/3000/interlayer_distance,6)} V/nm')
-        print(f'    E12 = {np.round(E_new[0],6)} V/nm',flush=True)
-        print(f'    E23 = {np.round(E_new[1],6)} V/nm',flush=True)
-        print(f'    E34 = {np.round(E_new[2],6)} V/nm',flush=True)
+        print(f'    Ext = {np.round(U_ext/(model.num_layers-1)/1000/interlayer_distance,6)} V/nm')
+        print(f'    Induced = {np.round(E_induced,rounding)} V/nm') # only taking outermost layers into account
     else:
+        print('')
         print('Hartree process did not converge',flush=True)
 
     return onsite
