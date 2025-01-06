@@ -526,15 +526,18 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
         fermi (float): Fermi energy (chemical potential).  aka the upper limit on our carrier density integrals
         mix (float): mixing weight, the percentage of the NEW step to include: x1 = (1-mix)*x0 + mix*x1
         maxiter (int): maximum number of iterations
-        conv_crit (float): convergence criteria for scf process
+        conv_crit (float): convergence criteria for self-consistent process
         rounding (int): number of digits to round resultant onsite energies to
      
     Returns:
         onsite (array): onsite energies [meV]
     """
 
+    if (mix < 0) or (mix > 1):
+        raise ValueError('mixing weight must satisfy: 0 <= mix <= 1')
+
     if (10**(-rounding) < conv_crit):
-        raise ValueError('Convergence criterion is more accurate than the rounding')
+        raise ValueError('Convergence criterion is more accurate than the rounding allows')
 
     print('------------------------------------------------------------------',flush=True)
     print('Starting screening calculation')
@@ -547,7 +550,6 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
 
     # Initial guess for onsite energies
     U_ext = 1e3 * (model.num_layers-1)*interlayer_distance*E_applied # [meV]
-    U_ext = 100.0 # [meV] TESTING VALUE
     onsite_ext = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # onsite energy contribution from external electric field [meV]
     onsite = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # list for proper input data-type for generate_grid ; will be overwritten below ; [meV]
 
@@ -575,7 +577,7 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
                     vecs[ky][kx] = en_vecs[ky][kx][band]
 
             band_square_min = np.min(en_grid[band]) # minimum of the band on a square grid.  
-                                                    # This function will then find it for the inscribed circle (max momentum cutoff)
+                                                    # The pdos function will then find it for the inscribed circle (max momentum cutoff)
             en_pdos_append,pdos_append = generate_pdos(model,en=en_grid[band],vecs=vecs,dE=dE,Emin=band_square_min,Emax=fermi)
 
             # Stores energies/pdos for each band
@@ -617,6 +619,7 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
         print('') # terminal goes to next line
         
         # This block uses electron densities in all layers to determine screened electric field.
+
         # Finds electron density for each layer (sums over all valence bands per layer)
         electron_density = list() # [layer]
         for layer in range(model.num_layers): # iterates over all layers
@@ -660,15 +663,15 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
                 onsite_new.insert(0,1000*V_lower) # lower-half
 
         else: # for an odd number of layers ; even number of spaces
-            raise NotImplementedError('An odd number of layers is not yet compatible with screening' , flush=True)
-        
-        # This now mixes result from prior step and this step.  It is standard for iterative processes, and helps avoid overshooting the true result
-        for ind in range(model.num_layers):
-            onsite_new[ind] = (1-mix)*onsite[ind] + mix*onsite_new[ind]
+            raise NotImplementedError('An odd number of layers is not yet compatible with screening (i am stupid)' , flush=True)
 
         # Combines onsite energies from external field and induced fields
         for ind,external_energy in enumerate(onsite_ext):
             onsite_new[ind] += external_energy
+
+        # This now mixes result from prior step and this step.  It is standard for iterative processes, and helps avoid overshooting the true result
+        for ind in range(model.num_layers):
+            onsite_new[ind] = (1-mix)*onsite[ind] + mix*onsite_new[ind]
 
         # Stores array where each element is the difference between new and prior onsite energies (for convergence criterion)
         diff = np.array(onsite_new)-np.array(onsite)
