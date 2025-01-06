@@ -366,7 +366,7 @@ def generate_dos(en,dE=0.01,Emin=-500,Emax=500):
     return en_out , dos/dE # number of counts per energy bin
 
 @njit
-def generate_pdos(model,en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
+def generate_pdos(model,en,vecs,dE=0.01,Emin=-500.0,Emax=500.0,carr=False):
     """
     Generates the partial density of states (PDOS) for our electronic bandstructure
 
@@ -377,12 +377,15 @@ def generate_pdos(model,en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
         dE (float): width of energy bin [same unit as en]
         Emin (float): minimum energy to analyze [same unit as en]
         Emax (float): maximum energy to analyze [same unit as en]
+        carr (boolean): whether to insert a -1/2N factor on each |coefficient|^2 term.  This is required for carrier densities
+                        as it compares current system to a system of isolated (non-interacting) graphene layers. The factor of
+                        1/2 is from putting this factor on EACH sublattice, of which there are two (A and B).
 
     Returns:
         en_out (array,float): energy axis for our dos
         pdos (array,float): partial density of electronic states (per spin)
     """
-    
+
     # finds band minimum/maximum within cutoff momentum (circle)
     k_radius = en.shape[0]/2
     band_minimum,band_maximum = Emax,Emin # initial guess, will be overwritten in this block (switched max-min so first step in loop declares)
@@ -410,6 +413,11 @@ def generate_pdos(model,en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
         en_flat = en.flatten() # C order flattens all indices (ky,kx)
         vec_flat = vecs.reshape(-1, vecs.shape[-1]) # C order flattens first all but last index (ky,kx)
 
+        if carr is True: # if we are using PDOS for carrier density calculation
+            one_over_two_N = 1/2/model.num_layers # compares current system to that of non-interacting layers
+        else: # if we are NOT using PDOS for carrier density calculation
+            one_over_two_N = 0 # solely adds |coefficient|^2
+
         for bin in prange(num_bins):
             E0 = Emin + bin*dE
             E1 = Emin + (bin+1)*dE
@@ -418,7 +426,7 @@ def generate_pdos(model,en,vecs,dE=0.01,Emin=-500.0,Emax=500.0):
                 energy_val = en_flat[energy_ind]
                 if E0 <= energy_val and energy_val < E1:
                     for coeff_ind,coeff in enumerate(vec_flat[energy_ind]):
-                        pdos[coeff_ind][bin] += np.abs(coeff)**2 - 1/2/model.num_layers
+                        pdos[coeff_ind][bin] += np.abs(coeff)**2 - one_over_two_N
 
     return en_out , pdos/dE # number of counts per energy bin
 
@@ -511,7 +519,7 @@ def carr_density_contour(krange,en,en_dos,dos):
 
     return n/(2*pi)**2
 
-def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_crit=1e-4,rounding=4):
+def hartree_screening(model,E_applied,num_k,dE,fermi,onsite=[],mix=0.5,maxiter=100,conv_crit=1e-4,rounding=4):
     """
     Determines onsite energies taking into account screening.  Implimented from:
     - PHYSICAL REVIEW B 81, 125304 (2010)
@@ -524,7 +532,8 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
         krange (float): analyze square grid of (-krange,krange) (units of k/G)
         dE (float): energy bin width for PDOS calculation
         fermi (float): Fermi energy (chemical potential).  aka the upper limit on our carrier density integrals
-        mix (float): mixing weight, the percentage of the NEW step to include: x1 = (1-mix)*x0 + mix*x1
+        onsite (list): initial guess of onsite energies [meV].  If not declared, will go from -U_ext/2 -> +U_ext/2
+        mix (float): mixing weight, the percentage of the NEW step to include; 0 <= mix < = 1: x1 = (1-mix)*x0 + mix*x1
         maxiter (int): maximum number of iterations
         conv_crit (float): convergence criteria for self-consistent process
         rounding (int): number of digits to round resultant onsite energies to
@@ -536,7 +545,7 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
     if (mix < 0) or (mix > 1):
         raise ValueError('mixing weight must satisfy: 0 <= mix <= 1')
 
-    if (10**(-rounding) < conv_crit):
+    if (conv_crit < 10**(-rounding)):
         raise ValueError('Convergence criterion is more accurate than the rounding allows')
 
     print('------------------------------------------------------------------',flush=True)
@@ -548,10 +557,12 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
     kappa_interlayer = 1 # permittivity of space between layers ; 1 for vacuum, 2.3 for system on SiO2 ; PHYSICAL REVIEW B 80, 195401 (2009)
     buffer = 0.01 # seconds to wait after printing update
 
-    # Initial guess for onsite energies
     U_ext = 1e3 * (model.num_layers-1)*interlayer_distance*E_applied # [meV]
     onsite_ext = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # onsite energy contribution from external electric field [meV]
-    onsite = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # list for proper input data-type for generate_grid ; will be overwritten below ; [meV]
+
+    # Initial guess for onsite energies if not declared by user
+    if len(onsite) == 0:
+        onsite = list(np.linspace(-U_ext/2,U_ext/2,model.num_layers)) # list for proper input data-type for generate_grid ; will be overwritten below ; [meV]
 
     converged = False # establishes convergence logic
     for iter in range(maxiter):
@@ -563,7 +574,7 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
         en_grid,en_vecs = model.generate_grid(num_k,k_cutoff,onsite,True)
 
         # Calculates PDOS for bands
-        prog_bar = '-' * (model.num_layers+1) # progress bar
+        prog_bar = '-' * (model.num_layers) # progress bar
         print(f'        Calculating partial density of states: [{prog_bar}] 0.0%',end="\r",flush=True)
         time.sleep(buffer)
 
@@ -578,14 +589,14 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
 
             band_square_min = np.min(en_grid[band]) # minimum of the band on a square grid.  
                                                     # The pdos function will then find it for the inscribed circle (max momentum cutoff)
-            en_pdos_append,pdos_append = generate_pdos(model,en=en_grid[band],vecs=vecs,dE=dE,Emin=band_square_min,Emax=fermi)
+            en_pdos_append,pdos_append = generate_pdos(model,en=en_grid[band],vecs=vecs,dE=dE,Emin=band_square_min,Emax=fermi,carr=True)
 
             # Stores energies/pdos for each band
             en_pdos.append(en_pdos_append)
             pdos.append(pdos_append)
 
-            prog_bar = 'X'*(band+1) + '-' * (model.num_layers+1-(band+1)) # progress bar
-            print(f'        Calculating partial density of states: [{prog_bar}] {np.round((band+1)/(model.num_layers+1)*100,2)}%',end="\r",flush=True)
+            prog_bar = 'X'*(band+1) + '-' * (model.num_layers-(band+1)) # progress bar
+            print(f'        Calculating partial density of states: [{prog_bar}] {np.round((band+1)/(model.num_layers)*100,2)}%',end="\r",flush=True)
             time.sleep(buffer)
 
         print('') # terminal goes to next line
@@ -626,7 +637,7 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
             electron_density.append(np.sum(electron_density_components[:,layer]))
 
         # print(f'        net_charge_density = {np.round(sum(electron_density),rounding)} x10^12 cm^-2')
-        print(f'        electron_density = {np.round(electron_density,rounding)} x10^12 cm^-2')
+        print(f'        electron_density = {list(np.round(electron_density,rounding))} x10^12 cm^-2')
 
         # Calculates new (screening) electric field between layers
         E_induced = np.zeros(model.num_layers-1) # will store new electric fields between layers from electrons
@@ -676,13 +687,13 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,mix=0.5,maxiter=100,conv_cr
         # Stores array where each element is the difference between new and prior onsite energies (for convergence criterion)
         diff = np.array(onsite_new)-np.array(onsite)
 
-        # Sets up next step
-        for onsite_ind,onsite_val in enumerate(onsite_new): # for-loop avoids pointer issue when copying lists
-            onsite[onsite_ind] = np.round(onsite_val,rounding)
-
         if np.max(abs(diff)) <= conv_crit: # if maximum difference is less than the convergence criterion
             converged = True
             break
+
+        # Sets up next step
+        for onsite_ind,onsite_val in enumerate(onsite_new): # for-loop avoids pointer issue when copying lists
+            onsite[onsite_ind] = np.round(onsite_val,rounding)
 
     if converged is True:
         print('')
