@@ -547,6 +547,9 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,onsite=[],mix=0.5,maxiter=1
 
     if (conv_crit < 10**(-rounding)):
         raise ValueError('Convergence criterion is more accurate than the rounding allows')
+    
+    if len(onsite) not in [0,model.num_layers]:
+        raise ValueError('Length of input onsite energies must be zero (empty list) or equal to the number of layers')
 
     print('------------------------------------------------------------------',flush=True)
     print('Starting screening calculation')
@@ -656,8 +659,8 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,onsite=[],mix=0.5,maxiter=1
         # Calculates new onsite terms from calculated carrier densities
         onsite_new = list() # places zero voltage at halfway between outermost layers
         if (model.num_layers%2 == 0): # for an even number of layers ; odd number of spaces
-            # for middle space
-            middle_space_index = model.num_layers//2-1
+            
+            middle_space_index = model.num_layers//2-1 # for middle space
 
             V_upper = +E_induced[middle_space_index]*interlayer_distance/2
             onsite_new.append(1000*V_upper) # 1000 * [V] * 1[e] = 1000*[eV] = [meV] ; upper-half
@@ -667,14 +670,29 @@ def hartree_screening(model,E_applied,num_k,dE,fermi,onsite=[],mix=0.5,maxiter=1
 
             # remaining spaces
             for space_index in range(1,(E_induced.shape[0]-1)//2+1):
-                V_upper += E_induced[middle_space_index + space_index]*(space_index*interlayer_distance)
+                V_upper += E_induced[middle_space_index + space_index]*interlayer_distance
                 onsite_new.append(1000*V_upper) # upper-half
 
-                V_lower -= E_induced[middle_space_index - space_index]*(space_index*interlayer_distance)
+                V_lower -= E_induced[middle_space_index - space_index]*interlayer_distance
                 onsite_new.insert(0,1000*V_lower) # lower-half
 
         else: # for an odd number of layers ; even number of spaces
-            raise NotImplementedError('An odd number of layers is not yet compatible with screening (i am stupid)' , flush=True)
+
+            onsite_new.append(0.0) # for central layer
+            V_upper = 0.0 # declaring for later for-loop
+            V_lower = 0.0 # declaring for later for-loop
+
+            middle_upper_space_index = E_induced.shape[0]//2 # for upper space of the two center-most spaces
+            middle_lower_space_index = E_induced.shape[0]//2-1 # for lower space of the two center-most spaces
+
+            # remaining spaces
+
+            for space_index in range(E_induced.shape[0]//2):
+                V_upper += E_induced[middle_upper_space_index + space_index]*interlayer_distance # [eV]
+                onsite_new.append(1000*V_upper) # [meV] upper-half
+
+                V_lower -= E_induced[middle_lower_space_index - space_index]*interlayer_distance # [eV]
+                onsite_new.insert(0,1000*V_lower) # [meV] lower-half
 
         # Combines onsite energies from external field and induced fields
         for ind,external_energy in enumerate(onsite_ext):
