@@ -585,33 +585,81 @@ def hartree_screening(model,num_k,dE,n_top=None,n_bottom=None,U_ext=None,doping=
 
             extra_band = 1 # number of extra bands to integrate for this doping (the lowest conduction band)
 
-            vecs = np.zeros((num_k,num_k,2*num_layers),dtype=complex) # [ky][kx][coeff] for lowest conduction band
-            for kx in range(num_k):
-                for ky in range(num_k):
-                    vecs[ky][kx] = en_vecs[ky][kx][num_layers]
+            # vecs = np.zeros((num_k,num_k,2*num_layers),dtype=complex) # [ky][kx][coeff] for lowest conduction band
+            # for kx in range(num_k):
+            #     for ky in range(num_k):
+            #         vecs[ky][kx] = en_vecs[ky][kx][num_layers]
             
             band_min = np.min(en_grid[num_layers]) # conduction band minimum
             energy_difference = np.min(en_grid[num_layers+1]) - band_min # difference between second lowest conduction band min. and lowest conduction band min.
 
-            fermi_energy = band_min # declares the start of our search
+            conduction_electron_density_last = 0 # conduction electron density of the prior step.  This initializes this for later checking
+            fermi_energy = band_min+dE # declares the start of our search
             for fermi_energy_index in range(int(energy_difference/dE)): # iterates from lowest cond. band min. to second lowest cond. band min.
 
+                # We put +dE twice for the first step to avoid errors when integrating over one bin
                 fermi_energy += dE # maximum on carrier density integrals (max energy to consider for PDOS)
 
                 conduction_dos_en,conduction_dos = generate_dos(en=en_grid[num_layers],Emin=band_min,Emax=fermi_energy,dE=dE)
-                conduction_electron_density = carr_density(krange=k_cutoff,en=en_grid[num_layers],en_dos=conduction_dos_en,dos=conduction_dos)
+                conduction_electron_density_current = carr_density(krange=k_cutoff,en=en_grid[num_layers],en_dos=conduction_dos_en,dos=conduction_dos)
 
-                if conduction_electron_density > doping: # this process is slowly works up the lowest conduction band until we hit the declared value
+                if conduction_electron_density_current > doping: # this process is slowly works up the lowest conduction band until we hit the declared value
+
+                    # Now determines if current or prior step is closest to the user-defined doping.
+                    if (abs(conduction_electron_density_current-doping) < abs(conduction_electron_density_last-doping)): # if current step is closer than prior step
+                        conduction_electron_density = conduction_electron_density_current
+                    else: # if prior step is closer than current step
+                        conduction_electron_density = conduction_electron_density_last
+
                     print(f'            Fermi level: {np.round(fermi_energy,rounding)} meV',flush=True)
                     print(f'            Electron doping: {np.round(conduction_electron_density,rounding)} x10^12 cm^-2',flush=True)
                     break
+
+                conduction_electron_density_last = conduction_electron_density_current
 
                 if (fermi_energy_index == int(energy_difference/dE)-1):
                     raise ValueError('The user declared amount of doping cannot be achieved with solely the lowest conduction band')
 
         elif (doping < 0): # hole-doped
-            raise NotImplementedError('Hole-doped systems (negative doping) is not yet supported')
-            extra_band = 0 # number of extra bands to integrate for this doping ()
+            
+            extra_band = 0 # number of extra bands to integrate for this doping (the highest valence band)
+
+            # vecs = np.zeros((num_k,num_k,2*num_layers),dtype=complex) # [ky][kx][coeff] for lowest conduction band
+            # for kx in range(num_k):
+            #     for ky in range(num_k):
+            #         vecs[ky][kx] = en_vecs[ky][kx][num_layers-1]
+            
+            band_max = np.max(en_grid[num_layers-1]) # valence band maximum
+            energy_difference = band_max - np.max(en_grid[num_layers-2]) # difference between highest valence band max. and second highest valence band max.
+
+            valence_electron_density_last = 0 # valence electron density of the prior step.  This initializes this for later checking
+            fermi_energy = band_max-dE # declares the start of our search
+            for fermi_energy_index in range(int(energy_difference/dE)): # iterates from lowest cond. band min. to second lowest cond. band min.
+
+                # We put -dE twice for the first step to avoid errors when integrating over one bin
+                fermi_energy -= dE # maximum on carrier density integrals (max energy to consider for PDOS)
+
+                valence_dos_en,valence_dos = generate_dos(en=en_grid[num_layers-1],Emin=fermi_energy,Emax=band_max,dE=dE)
+                valence_electron_density_current = -1*carr_density(krange=k_cutoff,en=en_grid[num_layers-1],en_dos=valence_dos_en,dos=valence_dos)
+                # -1 on valence_electron_density since we are integrating a valence band.  Determines how much below the band gap to set the Fermi level
+
+                if valence_electron_density_current < doping: # this process is slowly works up the lowest conduction band until we hit the declared value
+
+                    # Now determines if current or prior step is closest to the user-defined doping.
+                    if (abs(valence_electron_density_current-doping) < abs(valence_electron_density_last-doping)): # if current step is closer than prior step
+                        valence_electron_density = valence_electron_density_current
+                    else: # if prior step is closer than current step
+                        valence_electron_density = valence_electron_density_last
+
+                    print(f'            Fermi level: {np.round(fermi_energy,rounding)} meV',flush=True)
+                    print(f'            Electron doping: {np.round(valence_electron_density,rounding)} x10^12 cm^-2',flush=True)
+                    break
+
+                valence_electron_density_last = valence_electron_density_current
+
+                if (fermi_energy_index == int(energy_difference/dE)-1):
+                    raise ValueError('The user declared amount of doping cannot be achieved with solely the highest valence band')
+
         else:
             raise ValueError('Something has gone wrong with the doping declaration')
 
